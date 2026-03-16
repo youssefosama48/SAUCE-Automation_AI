@@ -333,115 +333,104 @@ function mapPriority(p) {
 async function generateSeleniumScripts(testCases, testKeys) {
   log('CLAUDE', 'Generating Selenium Node.js scripts');
 
-  const driverSnippet = DRIVER_JS_CONTENT
-    ? `The helpers/driver.js file provides these exports:
-- buildDriver()  — creates Edge headless WebDriver
-- login(driver, username, password) — logs in and waits for /inventory.html
-- logout(driver) — clicks burger menu → logout
-- runSuite(suiteName, tests) — runs all tests, creates fresh driver per test,
-  saves results to: results-{suite-name}.json at project root
-- SELECTORS — all page locators (login, header, inventory, cart, checkout)
-- BASE_URL — https://www.saucedemo.com`
-    : 'helpers/driver.js is not available — implement driver setup inline.';
-
   const prompt = `
-You are a senior Selenium automation engineer generating Node.js test scripts for SauceDemo.
+You are a senior Selenium automation engineer. Generate Node.js Selenium test scripts for SauceDemo (https://www.saucedemo.com).
 
-${driverSnippet}
+The project uses a custom test runner in helpers/driver.js that exports: login, logout, runSuite, BASE_URL.
+Do NOT import SELECTORS — use By directly from selenium-webdriver instead.
 
-EXACT SCRIPT PATTERN — copy this structure precisely:
-
+MANDATORY FILE TEMPLATE — every file must follow this EXACT structure:
+==========================================================================
 const { until, By } = require("selenium-webdriver");
-const { login, logout, runSuite, SELECTORS, BASE_URL } = require("../helpers/driver");
+const { login, logout, runSuite, BASE_URL } = require("../helpers/driver");
 
 const tests = [
-  // ── Example 1: Login test using SELECTORS ──
   {
-    name:     "Valid login redirects to inventory page",
-    expected: "User is redirected to /inventory.html",
+    name:     "Exact test case name",
+    expected: "What should happen",
     fn: async (driver) => {
+      // Use By.id(), By.css() directly — never use SELECTORS
       await driver.get(BASE_URL);
-      // CORRECT: pass SELECTORS.login.username directly to elementLocated
-      await driver.wait(until.elementLocated(SELECTORS.login.username), 10000);
-      await driver.findElement(SELECTORS.login.username).sendKeys("standard_user");
-      await driver.findElement(SELECTORS.login.password).sendKeys("secret_sauce");
-      await driver.findElement(SELECTORS.login.loginBtn).click();
+      await driver.wait(until.elementLocated(By.id("user-name")), 10000);
+      await driver.findElement(By.id("user-name")).sendKeys("standard_user");
+      await driver.findElement(By.id("password")).sendKeys("secret_sauce");
+      await driver.findElement(By.id("login-button")).click();
       await driver.wait(until.urlContains("/inventory.html"), 8000);
       const url = await driver.getCurrentUrl();
       return {
-        expectedResult: "User is redirected to /inventory.html",
+        expectedResult: "User is redirected to inventory page",
         actualResult:   "Redirected to: " + url,
-      };
-    },
-  },
-
-  // ── Example 2: Error message test ──
-  {
-    name:     "Empty credentials shows error",
-    expected: "Error message: Username is required",
-    fn: async (driver) => {
-      await driver.get(BASE_URL);
-      await driver.wait(until.elementLocated(SELECTORS.login.loginBtn), 10000);
-      await driver.findElement(SELECTORS.login.loginBtn).click();
-      // CORRECT: pass SELECTORS.login.errorMsg directly — it is already a By locator
-      const errorEl = await driver.wait(until.elementLocated(SELECTORS.login.errorMsg), 8000);
-      const text = await errorEl.getText();
-      if (!text.includes("Username is required")) throw new Error("Unexpected error: " + text);
-      return {
-        expectedResult: "Error message: Username is required",
-        actualResult:   "Error shown: " + text,
       };
     },
   },
 ];
 
 runSuite("Login Tests", tests);
+==========================================================================
 
-CRITICAL LOCATOR RULES:
-- SELECTORS.login.username IS already a By.id("user-name") object — pass it directly
-- CORRECT: driver.wait(until.elementLocated(SELECTORS.login.username), 10000)
-- CORRECT: driver.findElement(SELECTORS.login.username)
-- WRONG:   driver.findElement(By.id(SELECTORS.login.username))  ← double-wrapped = Invalid locator
-- WRONG:   driver.findElement({ id: SELECTORS.login.username }) ← not a By object
-- NEVER wrap SELECTORS values in By.id() or By.css() — they are ALREADY By objects
+AVAILABLE LOCATORS — use these exact By values:
+Login page:
+  By.id("user-name")                    — username input
+  By.id("password")                     — password input
+  By.id("login-button")                 — login button
+  By.css("[data-test='error']")         — error message
+  By.css(".error-button")               — error dismiss X button
+  By.css(".login_logo")                 — login page logo
 
-RESULTS JSON produced by runSuite (saved to results-{suite-name}.json):
-{
-  "suite": "Suite Name Tests",
-  "browser": "Microsoft Edge (headless)",
-  "environment": "Linux (CI)",
-  "startTime": "ISO",
-  "endTime": "ISO",
-  "duration": "Xs",
-  "summary": { "total": N, "passed": N, "failed": N, "status": "ALL PASSED|SOME FAILED" },
-  "tests": [
-    {
-      "id": 1, "name": "...", "status": "PASS|FAIL",
-      "expectedResult": "...", "actualResult": "...",
-      "executionNote": "", "errorDetail": "", "duration": "Xs"
-    }
-  ]
-}
+Header (after login):
+  By.id("react-burger-menu-btn")        — burger menu
+  By.css(".shopping_cart_link")         — cart icon
+  By.css(".shopping_cart_badge")        — cart item count badge
+  By.id("logout_sidebar_link")          — logout link (inside burger menu)
 
-Project credentials:
-- Valid user:    standard_user / secret_sauce
-- Locked user:  locked_out_user / secret_sauce
-- Invalid user: wrong_user / wrong_password
+Inventory page:
+  By.css(".inventory_container")        — inventory page container
+  By.css(".inventory_item")             — product items (multiple)
+  By.css("[data-test^='add-to-cart']")  — add to cart buttons
+  By.css("[data-test^='remove']")       — remove buttons
 
-Test cases to implement (id → Zephyr key → name):
+Cart page:
+  By.css(".cart_contents_container")    — cart container
+  By.css(".cart_item")                  — cart items
+  By.id("checkout")                     — checkout button
+  By.id("continue-shopping")            — continue shopping button
+
+Checkout:
+  By.id("first-name")                   — first name field
+  By.id("last-name")                    — last name field
+  By.id("postal-code")                  — postal code field
+  By.id("continue")                     — continue button
+  By.id("finish")                       — finish button
+  By.css(".complete-header")            — order complete header
+
+CREDENTIALS:
+  Valid:   username="standard_user"    password="secret_sauce"
+  Locked:  username="locked_out_user"  password="secret_sauce"
+  Invalid: username="wrong_user"       password="wrong_password"
+
+HELPER FUNCTIONS available from helpers/driver:
+  login(driver, username, password)  — navigates to BASE_URL, fills form, clicks login, waits for /inventory.html
+  logout(driver)                     — opens burger menu, clicks logout, waits for login page
+
+Test cases to generate (id → Zephyr key → name):
 ${testCases.map((tc, i) => `${tc.id} → ${testKeys[i]}: ${tc.name}`).join('\n')}
 
 Full test case details:
 ${JSON.stringify(testCases, null, 2)}
 
-INSTRUCTIONS:
-1. Group test cases by flowRef into separate files
-2. Filename pattern: tests/01-login.test.js, tests/02-cart.test.js etc.
-3. Each test in the array = one test case from above
-4. Use SELECTORS — never hardcode any CSS/ID locators
-5. Each fn MUST return { expectedResult, actualResult }
-6. Make tests independent — runSuite gives each a fresh driver
-7. DO NOT generate helpers/driver.js — it is provided separately
+RULES:
+1. Group tests by flowRef into one file per group
+2. Filename: tests/01-login.test.js, tests/02-cart.test.js etc.
+3. Each fn MUST return { expectedResult, actualResult }
+4. Use string concatenation NOT template literals for dynamic values:
+   CORRECT: actualResult: "URL: " + url
+   WRONG:   actualResult: "URL: " + url + " end"  with backticks anywhere
+5. NEVER use describe(), it(), beforeEach() — only runSuite()
+6. NEVER import SELECTORS — use By directly as shown above
+7. NEVER use require("chai") or require("mocha")
+8. Only test features that exist in SauceDemo (no registration, no signup)
+9. Keep each fn simple and focused on one scenario
+10. Always close all brackets and braces — no truncated files
 
 Return ONLY a JSON array:
 [
