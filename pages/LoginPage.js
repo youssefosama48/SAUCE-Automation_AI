@@ -6,115 +6,104 @@ class LoginPage {
     this.driver = driver;
     this.timeout = config.timeout.explicit;
     
-    this.usernameInput = By.id(config.pages.login_page.elements.username_input.locator);
-    this.passwordInput = By.id(config.pages.login_page.elements.password_input.locator);
-    this.loginButton = By.id(config.pages.login_page.elements.login_button.locator);
-    this.errorMessage = By.css(config.pages.login_page.elements.error_message.locator);
+    this.locators = {
+      usernameInput: By.id(config.pages.login_page.elements.username_input.locator),
+      passwordInput: By.id(config.pages.login_page.elements.password_input.locator),
+      loginButton: By.id(config.pages.login_page.elements.login_button.locator),
+      errorMessage: By.css(config.pages.login_page.elements.error_message.locator)
+    };
   }
-
+  
   async navigate() {
     await this.driver.get(config.pages.login_page.url);
     await this.waitForPageLoad();
   }
-
+  
   async waitForPageLoad() {
     await this.driver.wait(
-      until.elementLocated(this.usernameInput),
+      until.elementLocated(this.locators.usernameInput),
       this.timeout,
-      'Username input not found'
-    );
-    await this.driver.wait(
-      until.elementLocated(this.loginButton),
-      this.timeout,
-      'Login button not found'
+      'Login page did not load'
     );
   }
-
+  
   async enterUsername(username) {
-    const element = await this.driver.wait(
-      until.elementLocated(this.usernameInput),
+    const usernameField = await this.driver.wait(
+      until.elementLocated(this.locators.usernameInput),
       this.timeout
     );
-    await element.clear();
-    await element.sendKeys(username);
+    await usernameField.clear();
+    await usernameField.sendKeys(username);
   }
-
+  
   async enterPassword(password) {
-    const element = await this.driver.wait(
-      until.elementLocated(this.passwordInput),
+    const passwordField = await this.driver.wait(
+      until.elementLocated(this.locators.passwordInput),
       this.timeout
     );
-    await element.clear();
-    await element.sendKeys(password);
+    await passwordField.clear();
+    await passwordField.sendKeys(password);
   }
-
-  async clickLogin() {
-    const element = await this.driver.wait(
-      until.elementLocated(this.loginButton),
+  
+  async clickLoginButton() {
+    const loginBtn = await this.driver.wait(
+      until.elementLocated(this.locators.loginButton),
       this.timeout
     );
-    await element.click();
+    await this.driver.wait(until.elementIsVisible(loginBtn), this.timeout);
+    await loginBtn.click();
   }
-
+  
   async login(username, password) {
     await this.enterUsername(username);
     await this.enterPassword(password);
-    await this.clickLogin();
+    await this.clickLoginButton();
   }
-
+  
   async getErrorMessage() {
-    try {
-      const element = await this.driver.wait(
-        until.elementLocated(this.errorMessage),
-        this.timeout
-      );
-      return await element.getText();
-    } catch (error) {
-      return null;
-    }
+    const errorElement = await this.driver.wait(
+      until.elementLocated(this.locators.errorMessage),
+      this.timeout
+    );
+    await this.driver.wait(until.elementIsVisible(errorElement), this.timeout);
+    return await errorElement.getText();
   }
-
+  
   async isErrorMessageDisplayed() {
     try {
-      const element = await this.driver.wait(
-        until.elementLocated(this.errorMessage),
+      const errorElement = await this.driver.wait(
+        until.elementLocated(this.locators.errorMessage),
         this.timeout
       );
-      return await element.isDisplayed();
+      return await errorElement.isDisplayed();
     } catch (error) {
       return false;
     }
   }
-
-  async isUsernameInputDisplayed() {
-    try {
-      const element = await this.driver.findElement(this.usernameInput);
-      return await element.isDisplayed();
-    } catch (error) {
-      return false;
-    }
+  
+  async getPasswordFieldType() {
+    const passwordField = await this.driver.findElement(this.locators.passwordInput);
+    return await passwordField.getAttribute('type');
   }
-
-  async isPasswordInputDisplayed() {
-    try {
-      const element = await this.driver.findElement(this.passwordInput);
-      return await element.isDisplayed();
-    } catch (error) {
-      return false;
-    }
+  
+  async isLoginButtonEnabled() {
+    const loginBtn = await this.driver.findElement(this.locators.loginButton);
+    return await loginBtn.isEnabled();
   }
-
-  async isLoginButtonDisplayed() {
-    try {
-      const element = await this.driver.findElement(this.loginButton);
-      return await element.isDisplayed();
-    } catch (error) {
-      return false;
-    }
+  
+  async getPasswordFieldValue() {
+    const passwordField = await this.driver.findElement(this.locators.passwordInput);
+    return await passwordField.getAttribute('value');
   }
-
-  async getCurrentUrl() {
-    return await this.driver.getCurrentUrl();
+  
+  async clearUsername() {
+    const usernameField = await this.driver.findElement(this.locators.usernameInput);
+    await usernameField.clear();
+  }
+  
+  async clearPassword() {
+    const passwordField = await this.driver.findElement(this.locators.passwordInput);
+    await passwordField.clear();
   }
 }
 

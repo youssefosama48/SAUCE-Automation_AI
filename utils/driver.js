@@ -3,14 +3,10 @@ const edge = require('selenium-webdriver/edge');
 const config = require('../config/test.config');
 
 class DriverFactory {
-  constructor() {
-    this.driver = null;
-  }
-
-  async createDriver() {
+  static async createDriver() {
     const options = new edge.Options();
     
-    if (config.headless) {
+    if (config.headless || process.env.HEADLESS === 'true') {
       options.addArguments('--headless');
       options.addArguments('--disable-gpu');
     }
@@ -19,32 +15,26 @@ class DriverFactory {
     options.addArguments('--disable-dev-shm-usage');
     options.addArguments('--window-size=1920,1080');
     options.addArguments('--disable-blink-features=AutomationControlled');
-    options.setEdgeChromium(true);
-
-    this.driver = await new Builder()
+    
+    const driver = await new Builder()
       .forBrowser(Browser.EDGE)
       .setEdgeOptions(options)
       .build();
-
-    await this.driver.manage().setTimeouts({
+    
+    await driver.manage().setTimeouts({
       implicit: config.timeout.implicit,
       pageLoad: config.timeout.page_load
     });
-
-    await this.driver.manage().window().maximize();
     
-    return this.driver;
+    await driver.manage().window().maximize();
+    
+    return driver;
   }
-
-  async quitDriver() {
-    if (this.driver) {
-      await this.driver.quit();
-      this.driver = null;
+  
+  static async quitDriver(driver) {
+    if (driver) {
+      await driver.quit();
     }
-  }
-
-  getDriver() {
-    return this.driver;
   }
 }
 

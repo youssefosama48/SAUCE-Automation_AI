@@ -6,11 +6,11 @@ class TestReporter {
     this.results = [];
     this.cycleId = null;
   }
-
+  
   setCycleId(cycleId) {
     this.cycleId = cycleId;
   }
-
+  
   addResult(testCaseKey, tcId, name, status, duration, error = null) {
     this.results.push({
       testCaseKey,
@@ -21,35 +21,33 @@ class TestReporter {
       error
     });
   }
-
+  
   async writeResults() {
     const resultsDir = path.join(process.cwd(), 'results');
     
     if (!fs.existsSync(resultsDir)) {
       fs.mkdirSync(resultsDir, { recursive: true });
     }
-
-    const report = {
+    
+    const reportData = {
       timestamp: new Date().toISOString(),
-      cycleId: this.cycleId || 'default-cycle',
+      cycleId: this.cycleId || 'N/A',
       results: this.results
     };
-
+    
     const filePath = path.join(resultsDir, 'test-results.json');
     
-    fs.writeFileSync(filePath, JSON.stringify(report, null, 2), 'utf8');
+    fs.writeFileSync(filePath, JSON.stringify(reportData, null, 2), 'utf-8');
     
     console.log(`\nTest results written to: ${filePath}`);
     console.log(`Total tests: ${this.results.length}`);
     console.log(`Passed: ${this.results.filter(r => r.status === 'PASS').length}`);
     console.log(`Failed: ${this.results.filter(r => r.status === 'FAIL').length}`);
+    
+    return reportData;
   }
-
-  getResults() {
-    return this.results;
-  }
-
-  clearResults() {
+  
+  clear() {
     this.results = [];
   }
 }
