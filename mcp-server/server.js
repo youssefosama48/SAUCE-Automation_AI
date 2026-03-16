@@ -349,32 +349,61 @@ You are a senior Selenium automation engineer generating Node.js test scripts fo
 
 ${driverSnippet}
 
-EXACT SCRIPT PATTERN — follow this precisely for every test file:
-\`\`\`javascript
-const { until } = require("selenium-webdriver");
+EXACT SCRIPT PATTERN — copy this structure precisely:
+
+const { until, By } = require("selenium-webdriver");
 const { login, logout, runSuite, SELECTORS, BASE_URL } = require("../helpers/driver");
 
 const tests = [
+  // ── Example 1: Login test using SELECTORS ──
   {
-    name:     "Test case name here",
-    expected: "What should happen",
+    name:     "Valid login redirects to inventory page",
+    expected: "User is redirected to /inventory.html",
     fn: async (driver) => {
-      // Use driver directly — runSuite creates a fresh driver per test
-      // Use SELECTORS — never hardcode locators
-      // Always return { expectedResult, actualResult }
       await driver.get(BASE_URL);
+      // CORRECT: pass SELECTORS.login.username directly to elementLocated
       await driver.wait(until.elementLocated(SELECTORS.login.username), 10000);
+      await driver.findElement(SELECTORS.login.username).sendKeys("standard_user");
+      await driver.findElement(SELECTORS.login.password).sendKeys("secret_sauce");
+      await driver.findElement(SELECTORS.login.loginBtn).click();
+      await driver.wait(until.urlContains("/inventory.html"), 8000);
       const url = await driver.getCurrentUrl();
       return {
-        expectedResult: "Login page is displayed",
-        actualResult:   "Page loaded: " + url,
+        expectedResult: "User is redirected to /inventory.html",
+        actualResult:   "Redirected to: " + url,
+      };
+    },
+  },
+
+  // ── Example 2: Error message test ──
+  {
+    name:     "Empty credentials shows error",
+    expected: "Error message: Username is required",
+    fn: async (driver) => {
+      await driver.get(BASE_URL);
+      await driver.wait(until.elementLocated(SELECTORS.login.loginBtn), 10000);
+      await driver.findElement(SELECTORS.login.loginBtn).click();
+      // CORRECT: pass SELECTORS.login.errorMsg directly — it is already a By locator
+      const errorEl = await driver.wait(until.elementLocated(SELECTORS.login.errorMsg), 8000);
+      const text = await errorEl.getText();
+      if (!text.includes("Username is required")) throw new Error("Unexpected error: " + text);
+      return {
+        expectedResult: "Error message: Username is required",
+        actualResult:   "Error shown: " + text,
       };
     },
   },
 ];
 
-runSuite("Suite Name Tests", tests);
-\`\`\`
+runSuite("Login Tests", tests);
+
+CRITICAL LOCATOR RULES:
+- SELECTORS.login.username IS already a By.id("user-name") object — pass it directly
+- CORRECT: driver.wait(until.elementLocated(SELECTORS.login.username), 10000)
+- CORRECT: driver.findElement(SELECTORS.login.username)
+- WRONG:   driver.findElement(By.id(SELECTORS.login.username))  ← double-wrapped = Invalid locator
+- WRONG:   driver.findElement({ id: SELECTORS.login.username }) ← not a By object
+- NEVER wrap SELECTORS values in By.id() or By.css() — they are ALREADY By objects
 
 RESULTS JSON produced by runSuite (saved to results-{suite-name}.json):
 {
@@ -615,28 +644,46 @@ jobs:
       - name: Create results directory
         run: mkdir -p results
 
+      - name: Remove old mocha-style test files
+        run: |
+          echo "Removing old mocha/chai test files that use describe()..."
+          for f in tests/*.test.js; do
+            if grep -q "describe(" "$f" 2>/dev/null; then
+              echo "REMOVING old mocha file: $f"
+              rm "$f"
+            elif grep -q "require('chai')" "$f" 2>/dev/null || grep -q 'require("chai")' "$f" 2>/dev/null; then
+              echo "REMOVING chai file: $f"
+              rm "$f"
+            else
+              echo "OK (runSuite pattern): $f"
+            fi
+          done
+
       - name: Validate test file syntax before running
         run: |
           echo "Checking test file syntax..."
-          ERRORS=0
           for f in tests/*.test.js; do
+            [ -f "$f" ] || continue
             node --check "$f" 2>&1
             if [ $? -ne 0 ]; then
-              echo "SYNTAX ERROR in $f — skipping"
-              ERRORS=$((ERRORS+1))
+              echo "SYNTAX ERROR — removing: $f"
+              rm "$f"
             else
-              echo "OK: $f"
+              echo "VALID: $f"
             fi
           done
-          echo "Syntax check done. Errors: $ERRORS"
 
       - name: Run all Selenium test suites
         id: run_tests
         run: |
           echo "Running test files..."
-          for f in tests/*.test.js; do
-            # Only run files that pass syntax check
-            node --check "$f" 2>/dev/null || { echo "SKIP (syntax error): $f"; continue; }
+          shopt -s nullglob
+          files=(tests/*.test.js)
+          if [ \${#files[@]} -eq 0 ]; then
+            echo "No test files found in tests/"
+            exit 0
+          fi
+          for f in "\${files[@]}"; do
             echo "=== Running: $f ==="
             node "$f" 2>&1 || true
           done
