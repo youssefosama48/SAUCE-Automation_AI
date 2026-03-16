@@ -1,13 +1,14 @@
 {
-  "cycleId": "SAUC-R7",
+  "cycleId": "SAUC-R10",
   "testKeys": [
-    "SAUC-T78",
-    "SAUC-T79",
-    "SAUC-T80",
-    "SAUC-T81",
-    "SAUC-T82",
-    "SAUC-T83",
-    "SAUC-T84",
-    "SAUC-T85"
-  ]
+    "SAUC-T102",
+    "SAUC-T103",
+    "SAUC-T104",
+    "SAUC-T105",
+    "SAUC-T106",
+    "SAUC-T107",
+    "SAUC-T108",
+    "SAUC-T109"
+  ],
+  "storyKey": "SAUC-32"
 }
