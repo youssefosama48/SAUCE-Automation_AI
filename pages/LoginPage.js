@@ -4,7 +4,7 @@ const config = require('../config/test.config');
 class LoginPage {
   constructor(driver) {
     this.driver = driver;
-    this.timeout = config.timeout.explicit;
+    this.url = config.pages.login_page.url;
     
     this.usernameInput = By.id(config.pages.login_page.elements.username_input.locator);
     this.passwordInput = By.id(config.pages.login_page.elements.password_input.locator);
@@ -13,27 +13,20 @@ class LoginPage {
   }
 
   async navigate() {
-    await this.driver.get(config.pages.login_page.url);
+    await this.driver.get(this.url);
     await this.waitForPageLoad();
   }
 
   async waitForPageLoad() {
-    await this.driver.wait(
-      until.elementLocated(this.usernameInput),
-      this.timeout,
-      'Username input not found'
-    );
-    await this.driver.wait(
-      until.elementLocated(this.loginButton),
-      this.timeout,
-      'Login button not found'
-    );
+    await this.driver.wait(until.elementLocated(this.usernameInput), config.timeouts.explicit);
+    await this.driver.wait(until.elementLocated(this.passwordInput), config.timeouts.explicit);
+    await this.driver.wait(until.elementLocated(this.loginButton), config.timeouts.explicit);
   }
 
   async enterUsername(username) {
     const element = await this.driver.wait(
       until.elementLocated(this.usernameInput),
-      this.timeout
+      config.timeouts.explicit
     );
     await element.clear();
     await element.sendKeys(username);
@@ -42,7 +35,7 @@ class LoginPage {
   async enterPassword(password) {
     const element = await this.driver.wait(
       until.elementLocated(this.passwordInput),
-      this.timeout
+      config.timeouts.explicit
     );
     await element.clear();
     await element.sendKeys(password);
@@ -51,9 +44,29 @@ class LoginPage {
   async clickLogin() {
     const element = await this.driver.wait(
       until.elementLocated(this.loginButton),
-      this.timeout
+      config.timeouts.explicit
     );
     await element.click();
+  }
+
+  async getErrorMessage() {
+    const element = await this.driver.wait(
+      until.elementLocated(this.errorMessage),
+      config.timeouts.explicit
+    );
+    return await element.getText();
+  }
+
+  async isErrorMessageDisplayed() {
+    try {
+      const element = await this.driver.wait(
+        until.elementLocated(this.errorMessage),
+        config.timeouts.explicit
+      );
+      return await element.isDisplayed();
+    } catch (error) {
+      return false;
+    }
   }
 
   async login(username, password) {
@@ -62,31 +75,7 @@ class LoginPage {
     await this.clickLogin();
   }
 
-  async getErrorMessage() {
-    try {
-      const element = await this.driver.wait(
-        until.elementLocated(this.errorMessage),
-        this.timeout
-      );
-      return await element.getText();
-    } catch (error) {
-      return null;
-    }
-  }
-
-  async isErrorMessageDisplayed() {
-    try {
-      const element = await this.driver.wait(
-        until.elementLocated(this.errorMessage),
-        this.timeout
-      );
-      return await element.isDisplayed();
-    } catch (error) {
-      return false;
-    }
-  }
-
-  async isUsernameInputDisplayed() {
+  async isUsernameFieldPresent() {
     try {
       const element = await this.driver.findElement(this.usernameInput);
       return await element.isDisplayed();
@@ -95,7 +84,7 @@ class LoginPage {
     }
   }
 
-  async isPasswordInputDisplayed() {
+  async isPasswordFieldPresent() {
     try {
       const element = await this.driver.findElement(this.passwordInput);
       return await element.isDisplayed();
@@ -104,13 +93,21 @@ class LoginPage {
     }
   }
 
-  async isLoginButtonDisplayed() {
+  async isLoginButtonPresent() {
     try {
       const element = await this.driver.findElement(this.loginButton);
       return await element.isDisplayed();
     } catch (error) {
       return false;
     }
+  }
+
+  async getPasswordFieldType() {
+    const element = await this.driver.wait(
+      until.elementLocated(this.passwordInput),
+      config.timeouts.explicit
+    );
+    return await element.getAttribute('type');
   }
 
   async getCurrentUrl() {

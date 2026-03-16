@@ -10,56 +10,80 @@ describe('other', function() {
   let driverFactory;
   let driver;
   let loginPage;
-
+  
   before(async function() {
     driverFactory = new DriverFactory();
-    driver = await driverFactory.createDriver();
+    driver = await driverFactory.createDriver(false);
     loginPage = new LoginPage(driver);
   });
-
+  
   after(async function() {
     await driverFactory.quitDriver();
-    await reporter.writeResults();
   });
-
-  afterEach(async function() {
-    if (this.currentTest.state === 'failed') {
-      const screenshot = await driver.takeScreenshot();
-      console.log('Screenshot captured for failed test');
-    }
+  
+  beforeEach(async function() {
+    await loginPage.navigate();
   });
-
-  it('TC-007: Login page elements are displayed correctly', async function() {
-    // ZEPHYR: TC-007 -> SAUC-T52
+  
+  it('Password Field Masking Verification', async function() {
+    // ZEPHYR: TC-007 -> SAUC-T84
     const startTime = Date.now();
-    let status = 'PASS';
-    let error = null;
-
+    let testStatus = 'PASS';
+    let errorMessage = null;
+    
     try {
-      // Step 1: Navigate to login page
-      await loginPage.navigate();
-      const url = await loginPage.getCurrentUrl();
-      expect(url).to.include('saucedemo.com');
-
-      // Step 2: Verify username field is visible
-      const isUsernameDisplayed = await loginPage.isUsernameInputDisplayed();
-      expect(isUsernameDisplayed).to.be.true;
-
-      // Step 3: Verify password field is visible
-      const isPasswordDisplayed = await loginPage.isPasswordInputDisplayed();
-      expect(isPasswordDisplayed).to.be.true;
-
-      // Step 4: Verify login button is visible
-      const isLoginButtonDisplayed = await loginPage.isLoginButtonDisplayed();
-      expect(isLoginButtonDisplayed).to.be.true;
-
-    } catch (err) {
-      status = 'FAIL';
-      error = err.message;
-      throw err;
+      await loginPage.enterPassword('secret_sauce');
+      
+      const fieldType = await loginPage.getPasswordFieldType();
+      expect(fieldType).to.equal('password');
+      
+    } catch (error) {
+      testStatus = 'FAIL';
+      errorMessage = error.message;
+      throw error;
     } finally {
       const duration = Date.now() - startTime;
-      reporter.addResult('SAUC-T52', 'TC-007', 'Login page elements are displayed correctly', status, duration, error);
+      reporter.addResult({
+        testCaseKey: 'SAUC-T84',
+        tcId: 'TC-007',
+        name: 'Password Field Masking Verification',
+        status: testStatus,
+        duration: duration,
+        error: errorMessage
+      });
+    }
+  });
+  
+  it('Login Form Fields Presence', async function() {
+    // ZEPHYR: TC-008 -> SAUC-T85
+    const startTime = Date.now();
+    let testStatus = 'PASS';
+    let errorMessage = null;
+    
+    try {
+      const isUsernamePresent = await loginPage.isUsernameFieldPresent();
+      expect(isUsernamePresent).to.be.true;
+      
+      const isPasswordPresent = await loginPage.isPasswordFieldPresent();
+      expect(isPasswordPresent).to.be.true;
+      
+      const isLoginButtonPresent = await loginPage.isLoginButtonPresent();
+      expect(isLoginButtonPresent).to.be.true;
+      
+    } catch (error) {
+      testStatus = 'FAIL';
+      errorMessage = error.message;
+      throw error;
+    } finally {
+      const duration = Date.now() - startTime;
+      reporter.addResult({
+        testCaseKey: 'SAUC-T85',
+        tcId: 'TC-008',
+        name: 'Login Form Fields Presence',
+        status: testStatus,
+        duration: duration,
+        error: errorMessage
+      });
     }
   });
 });

@@ -1,11 +1,11 @@
 [
   {
     "id": "TC-001",
-    "name": "Successful login with valid credentials",
-    "objective": "Verify user can login with valid username and password",
+    "name": "Valid Login with Standard User",
+    "objective": "Verify registered user can login with valid credentials",
     "preconditions": [
-      "User is not logged in",
-      "Browser is open"
+      "Browser is open",
+      "SauceDemo login page is loaded"
     ],
     "steps": [
       {
@@ -30,7 +30,7 @@
         "testData": {
           "Password": "secret_sauce"
         },
-        "expectedResult": "Password is entered"
+        "expectedResult": "Password is masked and entered"
       },
       {
         "step": 4,
@@ -40,11 +40,11 @@
       },
       {
         "step": 5,
-        "action": "Verify inventory page URL and product list",
+        "action": "Verify inventory page URL",
         "testData": {
-          "Expected URL": "/inventory.html"
+          "Expected URL": "https://www.saucedemo.com/inventory.html"
         },
-        "expectedResult": "Inventory page loaded with products displayed"
+        "expectedResult": "User is on inventory page"
       }
     ],
     "testData": {
@@ -61,15 +61,16 @@
   },
   {
     "id": "TC-002",
-    "name": "Login fails with invalid username",
-    "objective": "Verify error message appears for invalid username",
+    "name": "Invalid Login with Wrong Password",
+    "objective": "Verify error message displays for incorrect password",
     "preconditions": [
-      "User is on login page"
+      "Browser is open",
+      "SauceDemo login page is loaded"
     ],
     "steps": [
       {
         "step": 1,
-        "action": "Navigate to login page",
+        "action": "Navigate to SauceDemo login page",
         "testData": {
           "URL": "https://www.saucedemo.com/"
         },
@@ -77,19 +78,19 @@
       },
       {
         "step": 2,
-        "action": "Enter invalid username",
+        "action": "Enter valid username",
         "testData": {
-          "Username": "invalid_user"
+          "Username": "standard_user"
         },
-        "expectedResult": "Invalid username is entered"
+        "expectedResult": "Username is entered"
       },
       {
         "step": 3,
-        "action": "Enter incorrect password",
+        "action": "Enter invalid password",
         "testData": {
           "Password": "wrong_password"
         },
-        "expectedResult": "Password is entered"
+        "expectedResult": "Password is masked and entered"
       },
       {
         "step": 4,
@@ -99,20 +100,20 @@
       },
       {
         "step": 5,
-        "action": "Verify user remains on login page",
+        "action": "Verify error message text",
         "testData": {
-          "Expected URL": "/"
+          "Expected Message": "Username and password do not match"
         },
-        "expectedResult": "User stays on login page"
+        "expectedResult": "Error message contains mismatch text"
       }
     ],
     "testData": {
-      "username": "invalid_user",
+      "username": "standard_user",
       "password": "wrong_password"
     },
     "tags": [
-      "negative",
       "regression",
+      "negative",
       "login"
     ],
     "priority": "High",
@@ -120,15 +121,16 @@
   },
   {
     "id": "TC-003",
-    "name": "Login fails with empty credentials",
-    "objective": "Verify error message when fields are blank",
+    "name": "Invalid Login with Unregistered User",
+    "objective": "Verify error displays for non-existent user",
     "preconditions": [
-      "User is on login page"
+      "Browser is open",
+      "SauceDemo login page is loaded"
     ],
     "steps": [
       {
         "step": 1,
-        "action": "Navigate to login page",
+        "action": "Navigate to SauceDemo login page",
         "testData": {
           "URL": "https://www.saucedemo.com/"
         },
@@ -136,19 +138,19 @@
       },
       {
         "step": 2,
-        "action": "Leave username field empty",
+        "action": "Enter unregistered username",
         "testData": {
-          "Username": ""
+          "Username": "invalid_user"
         },
-        "expectedResult": "Username field is blank"
+        "expectedResult": "Username is entered"
       },
       {
         "step": 3,
-        "action": "Leave password field empty",
+        "action": "Enter any password",
         "testData": {
-          "Password": ""
+          "Password": "any_password"
         },
-        "expectedResult": "Password field is blank"
+        "expectedResult": "Password is masked and entered"
       },
       {
         "step": 4,
@@ -158,95 +160,37 @@
       },
       {
         "step": 5,
-        "action": "Verify error message content",
+        "action": "Verify error message appears",
         "testData": {
-          "Expected Message": "Username is required"
+          "Expected Element": "[data-test='error']"
         },
-        "expectedResult": "Appropriate error message shown"
+        "expectedResult": "Error message is visible"
       }
     ],
     "testData": {
-      "username": "",
-      "password": ""
+      "username": "invalid_user",
+      "password": "any_password"
     },
     "tags": [
-      "negative",
       "regression",
-      "validation"
+      "negative",
+      "login"
     ],
     "priority": "High",
     "flowRef": "invalid_login"
   },
   {
     "id": "TC-004",
-    "name": "Login fails with valid username and empty password",
-    "objective": "Verify error for missing password",
+    "name": "Login with Empty Username",
+    "objective": "Verify error when username field is empty",
     "preconditions": [
-      "User is on login page"
+      "Browser is open",
+      "SauceDemo login page is loaded"
     ],
     "steps": [
       {
         "step": 1,
-        "action": "Navigate to login page",
-        "testData": {
-          "URL": "https://www.saucedemo.com/"
-        },
-        "expectedResult": "Login page is displayed"
-      },
-      {
-        "step": 2,
-        "action": "Enter valid username",
-        "testData": {
-          "Username": "standard_user"
-        },
-        "expectedResult": "Username is entered"
-      },
-      {
-        "step": 3,
-        "action": "Leave password field empty",
-        "testData": {
-          "Password": ""
-        },
-        "expectedResult": "Password field is blank"
-      },
-      {
-        "step": 4,
-        "action": "Click login button",
-        "testData": {},
-        "expectedResult": "Error message is displayed"
-      },
-      {
-        "step": 5,
-        "action": "Verify password required error",
-        "testData": {
-          "Expected Message": "Password is required"
-        },
-        "expectedResult": "Password required error shown"
-      }
-    ],
-    "testData": {
-      "username": "standard_user",
-      "password": ""
-    },
-    "tags": [
-      "negative",
-      "regression",
-      "validation"
-    ],
-    "priority": "Medium",
-    "flowRef": "invalid_login"
-  },
-  {
-    "id": "TC-005",
-    "name": "Login fails with empty username and valid password",
-    "objective": "Verify error for missing username",
-    "preconditions": [
-      "User is on login page"
-    ],
-    "steps": [
-      {
-        "step": 1,
-        "action": "Navigate to login page",
+        "action": "Navigate to SauceDemo login page",
         "testData": {
           "URL": "https://www.saucedemo.com/"
         },
@@ -258,11 +202,11 @@
         "testData": {
           "Username": ""
         },
-        "expectedResult": "Username field is blank"
+        "expectedResult": "Username field is empty"
       },
       {
         "step": 3,
-        "action": "Enter valid password",
+        "action": "Enter password",
         "testData": {
           "Password": "secret_sauce"
         },
@@ -276,11 +220,11 @@
       },
       {
         "step": 5,
-        "action": "Verify username required error",
+        "action": "Verify error message for required username",
         "testData": {
           "Expected Message": "Username is required"
         },
-        "expectedResult": "Username required error shown"
+        "expectedResult": "Error shows username required"
       }
     ],
     "testData": {
@@ -288,24 +232,25 @@
       "password": "secret_sauce"
     },
     "tags": [
-      "negative",
       "regression",
+      "negative",
       "validation"
     ],
     "priority": "Medium",
     "flowRef": "invalid_login"
   },
   {
-    "id": "TC-006",
-    "name": "Login fails with valid username and wrong password",
-    "objective": "Verify error for incorrect password",
+    "id": "TC-005",
+    "name": "Login with Empty Password",
+    "objective": "Verify error when password field is empty",
     "preconditions": [
-      "User is on login page"
+      "Browser is open",
+      "SauceDemo login page is loaded"
     ],
     "steps": [
       {
         "step": 1,
-        "action": "Navigate to login page",
+        "action": "Navigate to SauceDemo login page",
         "testData": {
           "URL": "https://www.saucedemo.com/"
         },
@@ -313,7 +258,7 @@
       },
       {
         "step": 2,
-        "action": "Enter valid username",
+        "action": "Enter username",
         "testData": {
           "Username": "standard_user"
         },
@@ -321,11 +266,11 @@
       },
       {
         "step": 3,
-        "action": "Enter incorrect password",
+        "action": "Leave password field empty",
         "testData": {
-          "Password": "wrong_password"
+          "Password": ""
         },
-        "expectedResult": "Wrong password is entered"
+        "expectedResult": "Password field is empty"
       },
       {
         "step": 4,
@@ -335,36 +280,149 @@
       },
       {
         "step": 5,
-        "action": "Verify credentials mismatch error",
+        "action": "Verify error message for required password",
         "testData": {
-          "Expected Message": "Username and password do not match"
+          "Expected Message": "Password is required"
         },
-        "expectedResult": "Mismatch error is shown"
+        "expectedResult": "Error shows password required"
       }
     ],
     "testData": {
       "username": "standard_user",
-      "password": "wrong_password"
+      "password": ""
     },
     "tags": [
-      "negative",
       "regression",
-      "security"
+      "negative",
+      "validation"
     ],
-    "priority": "High",
+    "priority": "Medium",
+    "flowRef": "invalid_login"
+  },
+  {
+    "id": "TC-006",
+    "name": "Login with Both Fields Empty",
+    "objective": "Verify error when both username and password are empty",
+    "preconditions": [
+      "Browser is open",
+      "SauceDemo login page is loaded"
+    ],
+    "steps": [
+      {
+        "step": 1,
+        "action": "Navigate to SauceDemo login page",
+        "testData": {
+          "URL": "https://www.saucedemo.com/"
+        },
+        "expectedResult": "Login page is displayed"
+      },
+      {
+        "step": 2,
+        "action": "Leave username field empty",
+        "testData": {
+          "Username": ""
+        },
+        "expectedResult": "Username field is empty"
+      },
+      {
+        "step": 3,
+        "action": "Leave password field empty",
+        "testData": {
+          "Password": ""
+        },
+        "expectedResult": "Password field is empty"
+      },
+      {
+        "step": 4,
+        "action": "Click login button",
+        "testData": {},
+        "expectedResult": "Error message is displayed"
+      },
+      {
+        "step": 5,
+        "action": "Verify error message appears",
+        "testData": {
+          "Expected Element": "[data-test='error']"
+        },
+        "expectedResult": "Error message is visible"
+      }
+    ],
+    "testData": {
+      "username": "",
+      "password": ""
+    },
+    "tags": [
+      "regression",
+      "negative",
+      "validation"
+    ],
+    "priority": "Medium",
     "flowRef": "invalid_login"
   },
   {
     "id": "TC-007",
-    "name": "Login page elements are displayed correctly",
-    "objective": "Verify all login elements are present",
+    "name": "Password Field Masking Verification",
+    "objective": "Verify password input is masked for security",
+    "preconditions": [
+      "Browser is open",
+      "SauceDemo login page is loaded"
+    ],
+    "steps": [
+      {
+        "step": 1,
+        "action": "Navigate to SauceDemo login page",
+        "testData": {
+          "URL": "https://www.saucedemo.com/"
+        },
+        "expectedResult": "Login page is displayed"
+      },
+      {
+        "step": 2,
+        "action": "Enter password in password field",
+        "testData": {
+          "Password": "secret_sauce"
+        },
+        "expectedResult": "Password is entered"
+      },
+      {
+        "step": 3,
+        "action": "Verify password field type attribute",
+        "testData": {
+          "Expected Type": "password"
+        },
+        "expectedResult": "Field type is password"
+      },
+      {
+        "step": 4,
+        "action": "Verify password characters are masked",
+        "testData": {
+          "Expected Display": "dots or asterisks"
+        },
+        "expectedResult": "Password text is not visible"
+      }
+    ],
+    "testData": {
+      "password": "secret_sauce"
+    },
+    "tags": [
+      "security",
+      "regression",
+      "ui"
+    ],
+    "priority": "High",
+    "flowRef": "other"
+  },
+  {
+    "id": "TC-008",
+    "name": "Login Form Fields Presence",
+    "objective": "Verify login form contains username and password fields",
     "preconditions": [
       "Browser is open"
     ],
     "steps": [
       {
         "step": 1,
-        "action": "Navigate to login page",
+        "action": "Navigate to SauceDemo login page",
         "testData": {
           "URL": "https://www.saucedemo.com/"
         },
@@ -372,88 +430,36 @@
       },
       {
         "step": 2,
-        "action": "Verify username field is visible",
+        "action": "Verify username field is present",
         "testData": {
-          "Element": "user-name"
+          "Element ID": "user-name"
         },
-        "expectedResult": "Username field is displayed"
+        "expectedResult": "Username field is visible"
       },
       {
         "step": 3,
-        "action": "Verify password field is visible",
+        "action": "Verify password field is present",
         "testData": {
-          "Element": "password"
+          "Element ID": "password"
         },
-        "expectedResult": "Password field is displayed"
+        "expectedResult": "Password field is visible"
       },
       {
         "step": 4,
-        "action": "Verify login button is visible",
+        "action": "Verify login button is present",
         "testData": {
-          "Element": "login-button"
+          "Element ID": "login-button"
         },
-        "expectedResult": "Login button is displayed"
+        "expectedResult": "Login button is visible"
       }
     ],
     "testData": {},
     "tags": [
       "smoke",
-      "ui"
-    ],
-    "priority": "Medium",
-    "flowRef": "other"
-  },
-  {
-    "id": "TC-008",
-    "name": "Verify inventory page after successful login",
-    "objective": "Confirm inventory page displays correctly",
-    "preconditions": [
-      "User has valid credentials"
-    ],
-    "steps": [
-      {
-        "step": 1,
-        "action": "Login with valid credentials",
-        "testData": {
-          "Username": "standard_user",
-          "Password": "secret_sauce"
-        },
-        "expectedResult": "User is logged in"
-      },
-      {
-        "step": 2,
-        "action": "Verify inventory page URL",
-        "testData": {
-          "Expected URL": "/inventory.html"
-        },
-        "expectedResult": "URL is correct"
-      },
-      {
-        "step": 3,
-        "action": "Verify product items are displayed",
-        "testData": {
-          "Element": "inventory_item"
-        },
-        "expectedResult": "Product list is visible"
-      },
-      {
-        "step": 4,
-        "action": "Verify shopping cart icon is present",
-        "testData": {
-          "Element": "shopping-cart-link"
-        },
-        "expectedResult": "Shopping cart icon is displayed"
-      }
-    ],
-    "testData": {
-      "username": "standard_user",
-      "password": "secret_sauce"
-    },
-    "tags": [
-      "smoke",
-      "regression"
+      "ui",
+      "sanity"
     ],
     "priority": "High",
-    "flowRef": "valid_login"
+    "flowRef": "other"
   }
 ]

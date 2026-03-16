@@ -7,10 +7,10 @@ class DriverFactory {
     this.driver = null;
   }
 
-  async createDriver() {
+  async createDriver(headless = false) {
     const options = new edge.Options();
     
-    if (config.headless) {
+    if (headless) {
       options.addArguments('--headless');
       options.addArguments('--disable-gpu');
     }
@@ -19,7 +19,7 @@ class DriverFactory {
     options.addArguments('--disable-dev-shm-usage');
     options.addArguments('--window-size=1920,1080');
     options.addArguments('--disable-blink-features=AutomationControlled');
-    options.setEdgeChromium(true);
+    options.setEdgeOptions(options);
 
     this.driver = await new Builder()
       .forBrowser(Browser.EDGE)
@@ -27,12 +27,12 @@ class DriverFactory {
       .build();
 
     await this.driver.manage().setTimeouts({
-      implicit: config.timeout.implicit,
-      pageLoad: config.timeout.page_load
+      implicit: config.timeouts.implicit,
+      pageLoad: config.timeouts.pageLoad
     });
 
     await this.driver.manage().window().maximize();
-    
+
     return this.driver;
   }
 
