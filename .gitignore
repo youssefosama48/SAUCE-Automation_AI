@@ -1,13 +1,3 @@
-node_modules/
-results/
-*.log
-screenshots/
-allure-results/
-allure-report/
-.DS_Store
+config/secrets.json
 .env
-package-lock.json
-secrets.json
-*.swp
-*.swo
-*~
+node_modules/
