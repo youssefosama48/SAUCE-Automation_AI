@@ -709,16 +709,28 @@ jobs:
             }
           }
 
-          // Read cycleId
-          let cycleId = 'unknown';
+          // Read cycleId AND testKeys from cycle_meta.json
+          let cycleId  = 'unknown';
+          let testKeys = [];
           try {
-            cycleId = JSON.parse(fs.readFileSync('config/cycle_meta.json')).cycleId || 'unknown';
-          } catch {}
+            const meta = JSON.parse(fs.readFileSync('config/cycle_meta.json'));
+            cycleId  = meta.cycleId  || 'unknown';
+            testKeys = meta.testKeys || [];
+          } catch (e) {
+            console.error('Could not read cycle_meta.json:', e.message);
+          }
 
+          console.log('Cycle ID  :', cycleId);
+          console.log('Test keys :', testKeys);
+          console.log('Tests     :', allTests.length);
+
+          // Map each result to its Zephyr test key by index position
+          // testKeys[0] = first test case created, testKeys[1] = second, etc.
           const combined = {
             timestamp:   new Date().toISOString(),
             environment: 'CI / Edge / Headless / Node 24',
             cycleId,
+            testKeys,
             summary: {
               total:   allTests.length,
               passed:  totPassed,
@@ -726,7 +738,8 @@ jobs:
               skipped: 0,
               status:  totFailed === 0 ? 'ALL PASSED' : 'SOME FAILED',
             },
-            results: allTests.map(t => ({
+            results: allTests.map((t, idx) => ({
+              testCaseKey:    testKeys[idx] || '',
               name:           t.name,
               status:         t.status,
               expectedResult: t.expectedResult || '',
@@ -735,6 +748,11 @@ jobs:
               error:          t.errorDetail    || null,
             })),
           };
+
+          console.log('Results with Zephyr keys:');
+          combined.results.forEach(r => {
+            console.log('  [' + r.status + '] ' + r.testCaseKey + ' — ' + r.name);
+          });
 
           fs.writeFileSync('results/test-results.json', JSON.stringify(combined, null, 2));
           console.log('Merged results written:', allTests.length, 'tests');
