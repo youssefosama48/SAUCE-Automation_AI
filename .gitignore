@@ -1,0 +1,12 @@
+node_modules/
+results/
+*.log
+screenshots/
+allure-results/
+allure-report/
+.DS_Store
+.env
+package-lock.json
+*.swp
+*.swo
+*~

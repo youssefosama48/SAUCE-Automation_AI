@@ -1,0 +1,164 @@
+# .github/workflows/qa-automation.yml
+# Triggered when the AI pipeline pushes scripts via PR merge to main
+# OR manually via workflow_dispatch
+
+name: QA Automation — Selenium Edge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tests/**'
+      - 'pages/**'
+      - 'utils/**'
+      - 'config/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tests/**'
+  workflow_dispatch:
+    inputs:
+      headless:
+        description: 'Run headless (true/false)'
+        required: false
+        default: 'true'
+
+env:
+  NODE_VERSION: '20'
+  HEADLESS: ${{ github.event.inputs.headless || 'true' }}
+
+jobs:
+  # ─── Job 1: Run Selenium Tests ──────────────────────────────────────────────
+  selenium-tests:
+    name: Selenium Tests (Edge / Headless)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install Microsoft Edge
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > microsoft.gpg
+          sudo install -o root -g root -m 644 microsoft.gpg /etc/apt/trusted.gpg.d/
+          sudo sh -c 'echo "deb [arch=amd64] https://packages.microsoft.com/repos/edge stable main" > /etc/apt/sources.list.d/microsoft-edge.list'
+          sudo apt-get update
+          sudo apt-get install -y microsoft-edge-stable
+          echo "Edge version: $(microsoft-edge --version)"
+
+      - name: Install EdgeDriver
+        run: |
+          EDGE_VERSION=$(microsoft-edge --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+          echo "Edge version: $EDGE_VERSION"
+          npm install -g edgedriver
+          edgedriver --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Load cycle metadata
+        id: meta
+        run: |
+          if [ -f config/cycle_meta.json ]; then
+            CYCLE_ID=$(jq -r '.cycleId' config/cycle_meta.json)
+            echo "ZEPHYR_CYCLE_ID=$CYCLE_ID" >> $GITHUB_ENV
+            echo "Zephyr cycle: $CYCLE_ID"
+          else
+            echo "No cycle_meta.json found — results will use env placeholders"
+          fi
+
+      - name: Run Selenium tests
+        env:
+          HEADLESS: ${{ env.HEADLESS }}
+          MCP_SERVER_URL: ${{ secrets.MCP_SERVER_URL }}
+          ZEPHYR_CYCLE_ID: ${{ env.ZEPHYR_CYCLE_ID }}
+          # Zephyr test case keys injected as env vars for reporter.js
+          TC_KEY_001: ${{ vars.TC_KEY_001 }}
+          TC_KEY_002: ${{ vars.TC_KEY_002 }}
+          TC_KEY_003: ${{ vars.TC_KEY_003 }}
+          TC_KEY_004: ${{ vars.TC_KEY_004 }}
+          TC_KEY_005: ${{ vars.TC_KEY_005 }}
+          TC_KEY_006: ${{ vars.TC_KEY_006 }}
+          TC_KEY_007: ${{ vars.TC_KEY_007 }}
+          TC_KEY_008: ${{ vars.TC_KEY_008 }}
+        run: |
+          mkdir -p results
+          npm test 2>&1 | tee results/console.log
+          echo "Exit code: $?"
+
+      - name: Upload results JSON
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: results/test-results.json
+          retention-days: 30
+
+      - name: Upload console log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: console-log
+          path: results/console.log
+          retention-days: 7
+
+      # ─── Step 9: Display results summary in CI logs ─────────────────────────
+      - name: Print results summary
+        if: always()
+        run: |
+          if [ -f results/test-results.json ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  TEST RESULTS SUMMARY"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            jq -r '
+              "Timestamp:   \(.timestamp)",
+              "Cycle ID:    \(.cycleId)",
+              "Total:       \(.summary.total)",
+              "Passed:      \(.summary.passed)",
+              "Failed:      \(.summary.failed)",
+              "Duration:    \(.summary.duration)ms",
+              "",
+              "Individual results:",
+              (.results[] | "  [\(.status)] \(.tcId) — \(.name)\(if .error then " → " + .error else "" end)")
+            ' results/test-results.json
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "No test-results.json found"
+          fi
+
+      # ─── Step 10: POST results to MCP server → Zephyr ───────────────────────
+      - name: Update Zephyr test cycle status
+        if: always() && env.MCP_SERVER_URL != ''
+        run: |
+          if [ -f results/test-results.json ]; then
+            echo "Posting results to MCP server for Zephyr update..."
+            RESULTS=$(cat results/test-results.json)
+            HTTP_STATUS=$(curl -s -o /tmp/zephyr_response.json -w "%{http_code}" \
+              -X POST "${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \
+              -H "Content-Type: application/json" \
+              -d "$RESULTS")
+            echo "MCP response (HTTP $HTTP_STATUS):"
+            cat /tmp/zephyr_response.json
+            if [ "$HTTP_STATUS" != "200" ]; then
+              echo "::warning::Zephyr update returned HTTP $HTTP_STATUS"
+            fi
+          else
+            echo "::warning::No test-results.json — skipping Zephyr update"
+          fi
+
+      - name: Fail workflow if tests failed
+        if: always()
+        run: |
+          if [ -f results/test-results.json ]; then
+            FAILED=$(jq '.summary.failed' results/test-results.json)
+            if [ "$FAILED" -gt "0" ]; then
+              echo "::error::$FAILED test(s) failed — see results above"
+              exit 1
+            fi
+          fi
