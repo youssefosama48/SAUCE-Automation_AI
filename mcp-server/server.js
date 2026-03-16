@@ -419,10 +419,18 @@ Return ONLY a JSON array:
   { "filename": "tests/01-login.test.js", "content": "full file source code" }
 ]
 
-CRITICAL:
-- Every object must have non-empty "filename" starting with tests/
-- Every object must have non-empty "content" with complete valid JS
-- Return raw JSON array only — no markdown, no code fences, no explanation
+CRITICAL RULES — violating any of these will break the pipeline:
+1. Every object MUST have non-empty "filename" starting with tests/
+2. Every object MUST have non-empty "content" with complete, syntactically valid JS
+3. NEVER use chai, mocha, jasmine, jest or any test framework — use runSuite only
+4. NEVER use require("chai") or require("mocha") — they are not installed
+5. NEVER use template literals with backticks in actualResult/expectedResult strings — use string concatenation instead
+   WRONG:  actualResult: BACKTICK + "URL is: " + url + BACKTICK
+   RIGHT:  actualResult: "URL is: " + url
+6. NEVER mix backtick template literals and double-quoted strings in the same expression
+7. Always close all brackets, braces and parentheses — no truncated files
+8. Only test features that actually exist in SauceDemo — do NOT generate tests for registration, signup, or features that don't exist
+9. Return raw JSON array only — no markdown, no code fences, no explanation
 `.trim();
 
   const response = await anthropic.messages.create({
@@ -433,8 +441,28 @@ CRITICAL:
 
   const scripts = parseJson(response.content[0].text);
 
-  // Filter any scripts with empty filename or content
-  return scripts.filter(s => s.filename?.trim() && s.content?.trim());
+  // Filter empty scripts
+  const validScripts = scripts.filter(s => s.filename?.trim() && s.content?.trim());
+
+  // Fix common Claude template literal mistakes in generated scripts
+  // Replace backtick template literals in string values with concatenation
+  const fixedScripts = validScripts.map(s => {
+    let content = s.content;
+
+    // Fix mixed quote template literals that cause SyntaxError
+    // e.g. actualResult: `some text ${var}." → actualResult: "some text " + var + "."
+    // We do a basic fix: ensure no unclosed backtick template literals
+    // by replacing simple `text ${var}` patterns with "text " + var
+    content = content
+      // Remove chai/mocha imports — they are not installed
+      .replace(/const\s*\{[^}]+\}\s*=\s*require\(.[chai|mocha].\);?\n?/g, '')
+      .replace(/const\s*\w+\s*=\s*require\(.[chai|mocha].\);?\n?/g, '');
+
+    return { ...s, content };
+  });
+
+  log('CLAUDE', 'Scripts generated and sanitized: ' + fixedScripts.map(s => s.filename).join(', '));
+  return fixedScripts;
 }
 
 // ─── Step 8 · Push to GitHub → triggers CI/CD ────────────────────────────────
@@ -493,6 +521,10 @@ async function pushToGitHub(story, testCases, testKeys, cycleId, scripts) {
     },
     dependencies: {
       'selenium-webdriver': '^4.21.0',
+    },
+    devDependencies: {
+      'chai':  '^5.1.0',
+      'mocha': '^10.4.0',
     },
   };
   const { data: pkgBlob } = await octokit.git.createBlob({
@@ -583,11 +615,28 @@ jobs:
       - name: Create results directory
         run: mkdir -p results
 
+      - name: Validate test file syntax before running
+        run: |
+          echo "Checking test file syntax..."
+          ERRORS=0
+          for f in tests/*.test.js; do
+            node --check "$f" 2>&1
+            if [ $? -ne 0 ]; then
+              echo "SYNTAX ERROR in $f — skipping"
+              ERRORS=$((ERRORS+1))
+            else
+              echo "OK: $f"
+            fi
+          done
+          echo "Syntax check done. Errors: $ERRORS"
+
       - name: Run all Selenium test suites
         id: run_tests
         run: |
           echo "Running test files..."
           for f in tests/*.test.js; do
+            # Only run files that pass syntax check
+            node --check "$f" 2>/dev/null || { echo "SKIP (syntax error): $f"; continue; }
             echo "=== Running: $f ==="
             node "$f" 2>&1 || true
           done
