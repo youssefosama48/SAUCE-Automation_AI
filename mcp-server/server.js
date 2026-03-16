@@ -544,7 +544,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: 'npm'
 
       - name: Install Microsoft Edge
         run: |
@@ -561,33 +560,36 @@ jobs:
           edgedriver --version
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
+
+      - name: Create results directory
+        run: mkdir -p results
 
       - name: Run Selenium tests
         env:
           HEADLESS: 'true'
           MCP_SERVER_URL: \${{ secrets.MCP_SERVER_URL }}
           ZEPHYR_CYCLE_ID: \${{ vars.ZEPHYR_CYCLE_ID }}
-        run: |
-          mkdir -p results
-          npm test 2>&1 | tee results/console.log || true
+        run: npm test 2>&1 | tee results/console.log || true
 
       - name: Generate results JSON if missing
         if: always()
         run: |
+          mkdir -p results
           if [ ! -f results/test-results.json ]; then
             echo "Test results file not found — generating fallback JSON"
-            cat > results/test-results.json << 'EOF'
-          {
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "environment": "CI / Edge / Headless",
-            "cycleId": "unknown",
-            "summary": { "total": 0, "passed": 0, "failed": 0, "skipped": 0, "duration": 0 },
-            "results": [],
-            "error": "Tests did not run or reporter did not write results"
-          }
-          EOF
+            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            echo "{" > results/test-results.json
+            echo "  \"timestamp\": \"$TIMESTAMP\"," >> results/test-results.json
+            echo "  \"environment\": \"CI / Edge / Headless\"," >> results/test-results.json
+            echo "  \"cycleId\": \"unknown\"," >> results/test-results.json
+            echo "  \"summary\": { \"total\": 0, \"passed\": 0, \"failed\": 0, \"skipped\": 0, \"duration\": 0 }," >> results/test-results.json
+            echo "  \"results\": []," >> results/test-results.json
+            echo "  \"error\": \"Tests did not run or reporter did not write results\"" >> results/test-results.json
+            echo "}" >> results/test-results.json
+            echo "Fallback JSON created"
           fi
+          cat results/test-results.json
 
       - name: Print results summary
         if: always()
@@ -596,15 +598,15 @@ jobs:
           echo "         TEST RESULTS SUMMARY"
           echo "======================================"
           if [ -f results/test-results.json ]; then
-            jq -r '"Timestamp: \(.timestamp)"' results/test-results.json
-            jq -r '"Cycle ID:  \(.cycleId)"' results/test-results.json
-            jq -r '"Total:     \(.summary.total)"' results/test-results.json
-            jq -r '"Passed:    \(.summary.passed)"' results/test-results.json
-            jq -r '"Failed:    \(.summary.failed)"' results/test-results.json
-            jq -r '"Duration:  \(.summary.duration)ms"' results/test-results.json
+            jq -r '"Timestamp: \(.timestamp)"' results/test-results.json || true
+            jq -r '"Cycle ID:  \(.cycleId)"' results/test-results.json || true
+            jq -r '"Total:     \(.summary.total)"' results/test-results.json || true
+            jq -r '"Passed:    \(.summary.passed)"' results/test-results.json || true
+            jq -r '"Failed:    \(.summary.failed)"' results/test-results.json || true
+            jq -r '"Duration:  \(.summary.duration)ms"' results/test-results.json || true
             echo "--------------------------------------"
             echo "Individual results:"
-            jq -r '.results[] | "[\(.status)] \(.tcId) — \(.name)\(if .error then " → " + .error else "" end)"' results/test-results.json
+            jq -r '.results[] | "[\(.status)] \(.tcId) — \(.name)"' results/test-results.json || echo "No individual results"
             echo "======================================"
           else
             echo "No results file found"
