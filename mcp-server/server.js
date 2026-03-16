@@ -398,8 +398,24 @@ function mapPriority(priority) {
 
 // ─── Step 6 · Claude generates Selenium scripts ───────────────────────────────
 
-// Exact driver.js content to always push to repo
-const DRIVER_JS_CONTENT = `${driver_js.replace(/`/g, "\`").replace(/\$\{/g, "\${").replace(/\\/g, "\\\\")}`;
+// Read driver.js content at startup — file must be at helpers/driver.js relative to project root
+// or fall back to the bundled copy
+let DRIVER_JS_CONTENT = '';
+try {
+  // Try to read from the project helpers folder
+  const driverPath = path.join(__dirname, '../helpers/driver.js');
+  DRIVER_JS_CONTENT = fs.readFileSync(driverPath, 'utf8');
+  log('SERVER', 'Loaded helpers/driver.js from project');
+} catch {
+  // Fall back to reading from the same folder as server.js
+  try {
+    const driverPath = path.join(__dirname, 'driver.js');
+    DRIVER_JS_CONTENT = fs.readFileSync(driverPath, 'utf8');
+    log('SERVER', 'Loaded driver.js from mcp-server folder');
+  } catch {
+    log('SERVER', 'WARNING: helpers/driver.js not found — will skip pushing driver file');
+  }
+}
 
 async function generateSeleniumScripts(testCases, testKeys) {
   log('CLAUDE', 'Generating Selenium JS automation scripts');
@@ -551,18 +567,23 @@ async function pushToGitHub(story, testCases, scripts) {
     sha:  tcBlob.sha,
   });
 
-  // Always push helpers/driver.js — the exact file from the project
-  let { data: driverBlob } = await octokit.git.createBlob({
-    owner, repo,
-    content:  Buffer.from(DRIVER_JS_CONTENT).toString('base64'),
-    encoding: 'base64',
-  });
-  treeItems.push({
-    path: 'helpers/driver.js',
-    mode: '100644',
-    type: 'blob',
-    sha:  driverBlob.sha,
-  });
+  // Always push helpers/driver.js — only if content was loaded
+  if (DRIVER_JS_CONTENT) {
+    let { data: driverBlob } = await octokit.git.createBlob({
+      owner, repo,
+      content:  Buffer.from(DRIVER_JS_CONTENT).toString('base64'),
+      encoding: 'base64',
+    });
+    treeItems.push({
+      path: 'helpers/driver.js',
+      mode: '100644',
+      type: 'blob',
+      sha:  driverBlob.sha,
+    });
+    log('GITHUB', 'Added helpers/driver.js to push');
+  } else {
+    log('GITHUB', 'WARNING: helpers/driver.js not pushed — file not found on server');
+  }
 
   // Push cycle_meta.json so Actions can read the cycleId
   let cycleMeta = { cycleId: '', testKeys: [] };
