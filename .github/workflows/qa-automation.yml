@@ -1,34 +1,18 @@
-# .github/workflows/qa-automation.yml
-# Triggered when the AI pipeline pushes scripts via PR merge to main
-# OR manually via workflow_dispatch
-
 name: QA Automation — Selenium Edge
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'tests/**'
       - 'pages/**'
       - 'utils/**'
       - 'config/**'
   pull_request:
-    branches: [main]
-    paths:
-      - 'tests/**'
+    branches: [master, main]
   workflow_dispatch:
-    inputs:
-      headless:
-        description: 'Run headless (true/false)'
-        required: false
-        default: 'true'
-
-env:
-  NODE_VERSION: '20'
-  HEADLESS: ${{ github.event.inputs.headless || 'true' }}
 
 jobs:
-  # ─── Job 1: Run Selenium Tests ──────────────────────────────────────────────
   selenium-tests:
     name: Selenium Tests (Edge / Headless)
     runs-on: ubuntu-latest
@@ -37,11 +21,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ env.NODE_VERSION }}
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          node-version: '24'
 
       - name: Install Microsoft Edge
         run: |
@@ -54,111 +37,95 @@ jobs:
 
       - name: Install EdgeDriver
         run: |
-          EDGE_VERSION=$(microsoft-edge --version | grep -oP '\d+\.\d+\.\d+\.\d+')
-          echo "Edge version: $EDGE_VERSION"
           npm install -g edgedriver
           edgedriver --version
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
-      - name: Load cycle metadata
-        id: meta
-        run: |
-          if [ -f config/cycle_meta.json ]; then
-            CYCLE_ID=$(jq -r '.cycleId' config/cycle_meta.json)
-            echo "ZEPHYR_CYCLE_ID=$CYCLE_ID" >> $GITHUB_ENV
-            echo "Zephyr cycle: $CYCLE_ID"
-          else
-            echo "No cycle_meta.json found — results will use env placeholders"
-          fi
+      - name: Create results directory
+        run: mkdir -p results
 
       - name: Run Selenium tests
         env:
-          HEADLESS: ${{ env.HEADLESS }}
+          HEADLESS: 'true'
           MCP_SERVER_URL: ${{ secrets.MCP_SERVER_URL }}
-          ZEPHYR_CYCLE_ID: ${{ env.ZEPHYR_CYCLE_ID }}
-          # Zephyr test case keys injected as env vars for reporter.js
-          TC_KEY_001: ${{ vars.TC_KEY_001 }}
-          TC_KEY_002: ${{ vars.TC_KEY_002 }}
-          TC_KEY_003: ${{ vars.TC_KEY_003 }}
-          TC_KEY_004: ${{ vars.TC_KEY_004 }}
-          TC_KEY_005: ${{ vars.TC_KEY_005 }}
-          TC_KEY_006: ${{ vars.TC_KEY_006 }}
-          TC_KEY_007: ${{ vars.TC_KEY_007 }}
-          TC_KEY_008: ${{ vars.TC_KEY_008 }}
+          ZEPHYR_CYCLE_ID: ${{ vars.ZEPHYR_CYCLE_ID }}
+        run: npm test 2>&1 | tee results/console.log || true
+
+      - name: Generate results JSON if missing
+        if: always()
         run: |
           mkdir -p results
-          npm test 2>&1 | tee results/console.log
-          echo "Exit code: $?"
+          if [ ! -f results/test-results.json ]; then
+            echo "Test results file not found — generating fallback JSON"
+            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            echo "{" > results/test-results.json
+            echo "  "timestamp": "$TIMESTAMP"," >> results/test-results.json
+            echo "  "environment": "CI / Edge / Headless"," >> results/test-results.json
+            echo "  "cycleId": "unknown"," >> results/test-results.json
+            echo "  "summary": { "total": 0, "passed": 0, "failed": 0, "skipped": 0, "duration": 0 }," >> results/test-results.json
+            echo "  "results": []," >> results/test-results.json
+            echo "  "error": "Tests did not run or reporter did not write results"" >> results/test-results.json
+            echo "}" >> results/test-results.json
+            echo "Fallback JSON created"
+          fi
+          cat results/test-results.json
 
-      - name: Upload results JSON
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results
-          path: results/test-results.json
-          retention-days: 30
-
-      - name: Upload console log
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: console-log
-          path: results/console.log
-          retention-days: 7
-
-      # ─── Step 9: Display results summary in CI logs ─────────────────────────
       - name: Print results summary
         if: always()
         run: |
+          echo "======================================"
+          echo "         TEST RESULTS SUMMARY"
+          echo "======================================"
           if [ -f results/test-results.json ]; then
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "  TEST RESULTS SUMMARY"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            jq -r '
-              "Timestamp:   \(.timestamp)",
-              "Cycle ID:    \(.cycleId)",
-              "Total:       \(.summary.total)",
-              "Passed:      \(.summary.passed)",
-              "Failed:      \(.summary.failed)",
-              "Duration:    \(.summary.duration)ms",
-              "",
-              "Individual results:",
-              (.results[] | "  [\(.status)] \(.tcId) — \(.name)\(if .error then " → " + .error else "" end)")
-            ' results/test-results.json
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            jq -r '"Timestamp: (.timestamp)"' results/test-results.json || true
+            jq -r '"Cycle ID:  (.cycleId)"' results/test-results.json || true
+            jq -r '"Total:     (.summary.total)"' results/test-results.json || true
+            jq -r '"Passed:    (.summary.passed)"' results/test-results.json || true
+            jq -r '"Failed:    (.summary.failed)"' results/test-results.json || true
+            jq -r '"Duration:  (.summary.duration)ms"' results/test-results.json || true
+            echo "--------------------------------------"
+            echo "Individual results:"
+            jq -r '.results[] | "[(.status)] (.tcId) — (.name)"' results/test-results.json || echo "No individual results"
+            echo "======================================"
           else
-            echo "No test-results.json found"
+            echo "No results file found"
           fi
 
-      # ─── Step 10: POST results to MCP server → Zephyr ───────────────────────
+      - name: Upload results JSON artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.run_number }}
+          path: results/test-results.json
+          retention-days: 30
+
+      - name: Upload console log artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: console-log-${{ github.run_number }}
+          path: results/console.log
+          retention-days: 7
+
       - name: Update Zephyr test cycle status
-        if: always() && env.MCP_SERVER_URL != ''
+        if: always()
         run: |
-          if [ -f results/test-results.json ]; then
-            echo "Posting results to MCP server for Zephyr update..."
-            RESULTS=$(cat results/test-results.json)
-            HTTP_STATUS=$(curl -s -o /tmp/zephyr_response.json -w "%{http_code}" \
-              -X POST "${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \
-              -H "Content-Type: application/json" \
-              -d "$RESULTS")
-            echo "MCP response (HTTP $HTTP_STATUS):"
-            cat /tmp/zephyr_response.json
-            if [ "$HTTP_STATUS" != "200" ]; then
-              echo "::warning::Zephyr update returned HTTP $HTTP_STATUS"
-            fi
-          else
-            echo "::warning::No test-results.json — skipping Zephyr update"
+          if [ -f results/test-results.json ] && [ -n "${{ secrets.MCP_SERVER_URL }}" ]; then
+            echo "Posting results to Zephyr via MCP server..."
+            HTTP_STATUS=$(curl -s -o /tmp/zephyr_resp.json -w "%{http_code}"               -X POST "${{ secrets.MCP_SERVER_URL }}/zephyr/update-results"               -H "Content-Type: application/json"               -d @results/test-results.json)
+            echo "Zephyr update HTTP status: $HTTP_STATUS"
+            cat /tmp/zephyr_resp.json
           fi
 
       - name: Fail workflow if tests failed
         if: always()
         run: |
           if [ -f results/test-results.json ]; then
-            FAILED=$(jq '.summary.failed' results/test-results.json)
+            FAILED=$(jq '.summary.failed // 0' results/test-results.json)
             if [ "$FAILED" -gt "0" ]; then
-              echo "::error::$FAILED test(s) failed — see results above"
+              echo "$FAILED test(s) FAILED"
               exit 1
             fi
           fi

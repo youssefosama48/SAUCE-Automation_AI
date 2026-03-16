@@ -11,18 +11,18 @@ class TestReporter {
     this.cycleId = cycleId;
   }
 
-  addResult(testCaseKey, tcId, name, status, duration, error = null) {
+  addResult(testResult) {
     this.results.push({
-      testCaseKey,
-      tcId,
-      name,
-      status,
-      duration,
-      error
+      testCaseKey: testResult.testCaseKey,
+      tcId: testResult.tcId,
+      name: testResult.name,
+      status: testResult.status,
+      duration: testResult.duration || 0,
+      error: testResult.error || null
     });
   }
 
-  async writeResults() {
+  writeResults() {
     const resultsDir = path.join(process.cwd(), 'results');
     
     if (!fs.existsSync(resultsDir)) {
@@ -31,13 +31,12 @@ class TestReporter {
 
     const report = {
       timestamp: new Date().toISOString(),
-      cycleId: this.cycleId || 'default-cycle',
+      cycleId: this.cycleId,
       results: this.results
     };
 
     const filePath = path.join(resultsDir, 'test-results.json');
-    
-    fs.writeFileSync(filePath, JSON.stringify(report, null, 2), 'utf8');
+    fs.writeFileSync(filePath, JSON.stringify(report, null, 2));
     
     console.log(`\nTest results written to: ${filePath}`);
     console.log(`Total tests: ${this.results.length}`);
