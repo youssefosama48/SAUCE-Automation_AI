@@ -398,56 +398,91 @@ function mapPriority(priority) {
 
 // ─── Step 6 · Claude generates Selenium scripts ───────────────────────────────
 
+// Exact driver.js content to always push to repo
+const DRIVER_JS_CONTENT = `${driver_js.replace(/`/g, "\`").replace(/\$\{/g, "\${").replace(/\\/g, "\\\\")}`;
+
 async function generateSeleniumScripts(testCases, testKeys) {
   log('CLAUDE', 'Generating Selenium JS automation scripts');
 
   let prompt = `
-You are a senior Selenium automation engineer.
+You are a senior Selenium automation engineer generating test scripts for SauceDemo.
 
-Project configuration:
-${JSON.stringify(config, null, 2)}
+The project uses a custom test runner — NOT Mocha. Study this pattern carefully:
 
-Generate complete, production-ready Selenium WebDriver JavaScript test files using Mocha + Chai.
-Follow the Page Object Model strictly.
+EXACT SCRIPT STRUCTURE — follow this precisely:
+=================================================
+const { until } = require("selenium-webdriver");
+const { login, logout, runSuite, SELECTORS, BASE_URL } = require("../helpers/driver");
 
-Rules:
-- Use Microsoft Edge browser (config.project.browser)
-- Use explicit waits via until module
-- Follow the repository structure: tests/, pages/, utils/, config/
-- Each test file must have a describe block matching the flowRef
-- Each it() block must reference the Zephyr test key as a comment: // ZEPHYR: TC-001 -> ZS-123
-- After all tests write results to ./results/test-results.json with shape:
-  { "timestamp": "ISO", "cycleId": "...", "results": [{ "testCaseKey": "ZS-xxx", "tcId": "TC-001", "name": "...", "status": "PASS|FAIL", "duration": 0, "error": null }] }
-- Import page objects from pages/ folder
-- Use the exact locators from config
+const tests = [
+  {
+    name:     "Test name here",
+    expected: "What should happen",
+    fn: async (driver) => {
+      // test steps using driver directly
+      // use SELECTORS from helpers/driver
+      return {
+        expectedResult: "What should happen",
+        actualResult:   "What actually happened",
+      };
+    },
+  },
+];
 
-Test cases with their Zephyr keys:
+runSuite("Suite Name", tests);
+=================================================
+
+HOW runSuite WORKS (do NOT reimplement it):
+- Creates a new driver per test automatically
+- Catches errors and marks test FAIL
+- Saves results to: results-{suite-name-lowercase-hyphenated}.json
+- Results JSON shape per test: { id, name, status, expectedResult, actualResult, executionNote, errorDetail, duration }
+- Overall shape: { suite, browser, environment, startTime, endTime, duration, summary: {total,passed,failed,status}, tests: [...] }
+
+SELECTORS available (from helpers/driver.js):
+- SELECTORS.login.username, .password, .loginBtn, .errorMsg, .errorClose, .loginLogo
+- SELECTORS.header.burgerMenu, .cartIcon, .cartBadge, .menuLogout
+- SELECTORS.inventory.container, .items, .addToCartBtn, .removeBtn, .sortDropdown
+- SELECTORS.cart.container, .items, .checkoutBtn, .continueShopBtn, .removeBtn
+- SELECTORS.checkoutOne.firstName, .lastName, .postalCode, .continueBtn
+- SELECTORS.checkoutTwo.finishBtn, .totalLabel
+- SELECTORS.checkoutComplete.header, .backHomeBtn
+
+HELPER FUNCTIONS:
+- login(driver, username, password) — logs in and waits for inventory page
+- logout(driver) — opens burger menu and clicks logout
+
+PROJECT CONFIG:
+- Base URL: https://www.saucedemo.com
+- Valid user: standard_user / secret_sauce
+- Locked user: locked_out_user / secret_sauce
+- Browser: Microsoft Edge headless
+
+Test cases to implement (with their Zephyr keys):
 ${testCases.map((tc, i) => `${tc.id} -> ${testKeys[i]}: ${tc.name}`).join('\n')}
 
-Full test cases:
+Full test cases details:
 ${JSON.stringify(testCases, null, 2)}
 
-Return ONLY a JSON array where each object has:
-{
-  "filename": "tests/valid_login.test.js",
-  "content": "full file content as a string"
-}
+INSTRUCTIONS:
+1. Group test cases by flowRef into separate test files
+2. Each file: tests/XX-{flowRef}.test.js (e.g. tests/01-login.test.js)
+3. Each test in the array maps to one test case above
+4. Use SELECTORS — never hardcode locators
+5. Each fn must return { expectedResult, actualResult }
+6. Keep tests independent — each gets a fresh driver via runSuite
 
-Include:
-1. Page objects: pages/LoginPage.js, pages/InventoryPage.js
-2. Test specs grouped by flowRef
-3. utils/driver.js — Edge driver factory with headless support
-4. utils/reporter.js — writes results JSON
-5. config/test.config.js — runtime config
+CRITICAL RULES:
+- Every object MUST have non-empty "filename" starting with tests/
+- Every object MUST have non-empty "content"
+- ONLY generate test files — do NOT generate helpers/driver.js (it is provided separately)
+- Return raw JSON array only — no markdown, no code fences
 
-CRITICAL RULES for the JSON array:
-- Every object MUST have a non-empty "filename" string like "tests/login.test.js"
-- Every object MUST have a non-empty "content" string with the full file code
-- filename MUST start with one of: tests/, pages/, utils/, config/
-- NEVER return an object with an empty filename or empty content
-- NEVER include objects without both filename and content fields
-
-Return raw JSON array only — no markdown, no code fences, no extra text.
+Return ONLY this JSON array:
+[
+  { "filename": "tests/01-login.test.js", "content": "full file content" },
+  { "filename": "tests/02-cart.test.js",  "content": "full file content" }
+]
   `.trim();
 
   let response = await anthropic.messages.create({
@@ -516,6 +551,37 @@ async function pushToGitHub(story, testCases, scripts) {
     sha:  tcBlob.sha,
   });
 
+  // Always push helpers/driver.js — the exact file from the project
+  let { data: driverBlob } = await octokit.git.createBlob({
+    owner, repo,
+    content:  Buffer.from(DRIVER_JS_CONTENT).toString('base64'),
+    encoding: 'base64',
+  });
+  treeItems.push({
+    path: 'helpers/driver.js',
+    mode: '100644',
+    type: 'blob',
+    sha:  driverBlob.sha,
+  });
+
+  // Push cycle_meta.json so Actions can read the cycleId
+  let cycleMeta = { cycleId: '', testKeys: [] };
+  try {
+    const metaPath = require('path').join(__dirname, '../config/cycle_meta.json');
+    cycleMeta = JSON.parse(require('fs').readFileSync(metaPath));
+  } catch { /* use defaults */ }
+  let { data: metaBlob } = await octokit.git.createBlob({
+    owner, repo,
+    content:  Buffer.from(JSON.stringify(cycleMeta, null, 2)).toString('base64'),
+    encoding: 'base64',
+  });
+  treeItems.push({
+    path: 'config/cycle_meta.json',
+    mode: '100644',
+    type: 'blob',
+    sha:  metaBlob.sha,
+  });
+
   // Add GitHub Actions workflow file — triggers CI on push/merge
   const workflowContent = `name: QA Automation — Selenium Edge
 
@@ -524,8 +590,7 @@ on:
     branches: [master, main]
     paths:
       - 'tests/**'
-      - 'pages/**'
-      - 'utils/**'
+      - 'helpers/**'
       - 'config/**'
   pull_request:
     branches: [master, main]
@@ -565,51 +630,119 @@ jobs:
       - name: Create results directory
         run: mkdir -p results
 
-      - name: Run Selenium tests
-        env:
-          HEADLESS: 'true'
-          MCP_SERVER_URL: \${{ secrets.MCP_SERVER_URL }}
-          ZEPHYR_CYCLE_ID: \${{ vars.ZEPHYR_CYCLE_ID }}
-        run: npm test 2>&1 | tee results/console.log || true
+      - name: Run all test suites
+        run: |
+          mkdir -p results
+          echo "Running all test files in tests/ folder..."
+          for f in tests/*.test.js; do
+            echo "--- Running: $f ---"
+            node "$f" 2>&1 || true
+          done
+          echo "All suites completed"
 
-      - name: Generate results JSON if missing
+      - name: Collect and merge all results JSON files
         if: always()
         run: |
           mkdir -p results
-          if [ ! -f results/test-results.json ]; then
-            echo "Test results file not found — generating fallback JSON"
+          echo "Collecting results JSON files..."
+          ls -la results-*.json 2>/dev/null || echo "No results files at root"
+
+          # Move any results files from root to results/
+          mv results-*.json results/ 2>/dev/null || true
+
+          # List what we have
+          ls -la results/ || true
+
+          # Merge all results-*.json into one combined file
+          if ls results/results-*.json 1> /dev/null 2>&1; then
+            echo "Merging results files..."
+            node -e "
+              const fs = require('fs');
+              const files = fs.readdirSync('results').filter(f => f.startsWith('results-') && f.endsWith('.json'));
+              console.log('Found files:', files);
+
+              let allTests = [];
+              let totalPassed = 0;
+              let totalFailed = 0;
+
+              for (const file of files) {
+                const data = JSON.parse(fs.readFileSync('results/' + file));
+                allTests = allTests.concat(data.tests || []);
+                totalPassed += data.summary?.passed || 0;
+                totalFailed += data.summary?.failed || 0;
+              }
+
+              // Read cycleId from config
+              let cycleId = 'unknown';
+              try {
+                const meta = JSON.parse(fs.readFileSync('config/cycle_meta.json'));
+                cycleId = meta.cycleId || 'unknown';
+              } catch(e) {}
+
+              const combined = {
+                timestamp:   new Date().toISOString(),
+                environment: 'CI / Edge / Headless / Node 24',
+                cycleId,
+                summary: {
+                  total:   allTests.length,
+                  passed:  totalPassed,
+                  failed:  totalFailed,
+                  skipped: 0,
+                  status:  totalFailed === 0 ? 'ALL PASSED' : 'SOME FAILED'
+                },
+                results: allTests.map(t => ({
+                  tcId:           t.id || '',
+                  testCaseKey:    t.zephyrKey || '',
+                  name:           t.name,
+                  status:         t.status,
+                  expectedResult: t.expectedResult || '',
+                  actualResult:   t.actualResult   || '',
+                  duration:       t.duration       || '0s',
+                  error:          t.errorDetail    || null
+                }))
+              };
+
+              fs.writeFileSync('results/test-results.json', JSON.stringify(combined, null, 2));
+              console.log('Combined results written: ' + allTests.length + ' tests');
+            "
+          else
+            echo "No results files found — creating fallback"
             TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            echo "{" > results/test-results.json
-            echo "  \"timestamp\": \"$TIMESTAMP\"," >> results/test-results.json
-            echo "  \"environment\": \"CI / Edge / Headless\"," >> results/test-results.json
-            echo "  \"cycleId\": \"unknown\"," >> results/test-results.json
-            echo "  \"summary\": { \"total\": 0, \"passed\": 0, \"failed\": 0, \"skipped\": 0, \"duration\": 0 }," >> results/test-results.json
-            echo "  \"results\": []," >> results/test-results.json
-            echo "  \"error\": \"Tests did not run or reporter did not write results\"" >> results/test-results.json
-            echo "}" >> results/test-results.json
-            echo "Fallback JSON created"
+            node -e "
+              const fs = require('fs');
+              let cycleId = 'unknown';
+              try { cycleId = JSON.parse(fs.readFileSync('config/cycle_meta.json')).cycleId || 'unknown'; } catch(e) {}
+              const fallback = {
+                timestamp: new Date().toISOString(),
+                environment: 'CI / Edge / Headless / Node 24',
+                cycleId,
+                summary: { total: 0, passed: 0, failed: 0, skipped: 0, status: 'NO TESTS RAN' },
+                results: [],
+                error: 'No test result files were generated'
+              };
+              fs.mkdirSync('results', { recursive: true });
+              fs.writeFileSync('results/test-results.json', JSON.stringify(fallback, null, 2));
+              console.log('Fallback results written');
+            "
           fi
-          cat results/test-results.json
 
       - name: Print results summary
         if: always()
         run: |
           echo "======================================"
-          echo "         TEST RESULTS SUMMARY"
+          echo "       TEST RESULTS SUMMARY"
           echo "======================================"
           if [ -f results/test-results.json ]; then
-            jq -r '"Timestamp: \(.timestamp)"' results/test-results.json || true
-            jq -r '"Cycle ID:  \(.cycleId)"' results/test-results.json || true
-            jq -r '"Total:     \(.summary.total)"' results/test-results.json || true
-            jq -r '"Passed:    \(.summary.passed)"' results/test-results.json || true
-            jq -r '"Failed:    \(.summary.failed)"' results/test-results.json || true
-            jq -r '"Duration:  \(.summary.duration)ms"' results/test-results.json || true
+            jq -r '"Cycle ID : " + .cycleId' results/test-results.json || true
+            jq -r '"Total    : " + (.summary.total | tostring)' results/test-results.json || true
+            jq -r '"Passed   : " + (.summary.passed | tostring)' results/test-results.json || true
+            jq -r '"Failed   : " + (.summary.failed | tostring)' results/test-results.json || true
+            jq -r '"Status   : " + .summary.status' results/test-results.json || true
             echo "--------------------------------------"
-            echo "Individual results:"
-            jq -r '.results[] | "[\(.status)] \(.tcId) — \(.name)"' results/test-results.json || echo "No individual results"
+            jq -r '.results[] | "[" + .status + "] " + .name' results/test-results.json || echo "No results"
             echo "======================================"
           else
-            echo "No results file found"
+            echo "No results/test-results.json found"
           fi
 
       - name: Upload results JSON artifact
@@ -620,25 +753,28 @@ jobs:
           path: results/test-results.json
           retention-days: 30
 
-      - name: Upload console log artifact
+      - name: Upload all raw results artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: console-log-\${{ github.run_number }}
-          path: results/console.log
+          name: raw-results-\${{ github.run_number }}
+          path: results/
           retention-days: 7
 
-      - name: Update Zephyr test cycle status
+      - name: Send results to MCP server → update Zephyr cycle
         if: always()
         run: |
           if [ -f results/test-results.json ] && [ -n "\${{ secrets.MCP_SERVER_URL }}" ]; then
-            echo "Posting results to Zephyr via MCP server..."
+            echo "Sending results to MCP server for Zephyr update..."
+            cat results/test-results.json
             HTTP_STATUS=$(curl -s -o /tmp/zephyr_resp.json -w "%{http_code}" \
               -X POST "\${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \
               -H "Content-Type: application/json" \
               -d @results/test-results.json)
-            echo "Zephyr update HTTP status: $HTTP_STATUS"
+            echo "MCP response (HTTP $HTTP_STATUS):"
             cat /tmp/zephyr_resp.json
+          else
+            echo "Skipping Zephyr update — no results file or MCP_SERVER_URL not set"
           fi
 
       - name: Fail workflow if tests failed
@@ -647,7 +783,7 @@ jobs:
           if [ -f results/test-results.json ]; then
             FAILED=$(jq '.summary.failed // 0' results/test-results.json)
             if [ "$FAILED" -gt "0" ]; then
-              echo "$FAILED test(s) FAILED"
+              echo "$FAILED test(s) FAILED — see results above"
               exit 1
             fi
           fi
@@ -672,15 +808,10 @@ jobs:
       node: ">=24.0.0"
     },
     scripts: {
-      test: "mocha --recursive tests/ --timeout 60000 --reporter spec --exit",
-      "test:json": "mocha --recursive tests/ --timeout 60000 --reporter json --exit > results/test-results-mocha.json || true"
+      test: "for f in tests/*.test.js; do node $f; done"
     },
     dependencies: {
       "selenium-webdriver": "^4.21.0"
-    },
-    devDependencies: {
-      "chai": "^5.1.0",
-      "mocha": "^10.4.0"
     }
   };
   let { data: pkgBlob } = await octokit.git.createBlob({
@@ -729,44 +860,78 @@ jobs:
 
 app.post('/zephyr/update-results', async (req, res) => {
   try {
-    const { results } = req.body;
-    if (!results?.length) return res.status(400).json({ error: 'No results provided' });
+    // Accept full results object from GitHub Actions
+    const body = req.body;
+    const results  = body.results || [];
+    const cycleId  = body.cycleId || null;
+    const summary  = body.summary || {};
 
-    let metaPath = path.join(__dirname, '../config/cycle_meta.json');
-    let meta     = JSON.parse(fs.readFileSync(metaPath));
-    let { cycleId } = meta;
+    if (!results.length) return res.status(400).json({ error: 'No results provided' });
+
+    // Use cycleId from request body first, fall back to cycle_meta.json
+    let activeCycleId = cycleId;
+    if (!activeCycleId) {
+      try {
+        let metaPath = path.join(__dirname, '../config/cycle_meta.json');
+        let meta     = JSON.parse(fs.readFileSync(metaPath));
+        activeCycleId = meta.cycleId;
+      } catch { /* use null */ }
+    }
+    if (!activeCycleId) return res.status(400).json({ error: 'No cycleId found in request or cycle_meta.json' });
 
     const { baseUrl, projectKey } = config.zephyr;
     const headers = zephyrHeaders();
 
-    log('ZEPHYR', `Updating ${results.length} results on cycle ${cycleId}`);
+    log('ZEPHYR', `Updating ${results.length} results on cycle ${activeCycleId}`);
+    log('ZEPHYR', `Summary — Total: ${summary.total} | Passed: ${summary.passed} | Failed: ${summary.failed}`);
+
+    let statusMap = { 'PASS': 'Pass', 'FAIL': 'Fail', 'SKIP': 'Blocked' };
+    let updated = 0;
+    let skipped = 0;
 
     for (let r of results) {
-      let statusMap = {
-        'PASS': 'Pass',
-        'FAIL': 'Fail',
-        'SKIP': 'Blocked',
-      };
+      // Match test to Zephyr key — results may have testCaseKey or we match by name
+      let zephyrKey = r.testCaseKey || null;
+
+      if (!zephyrKey) {
+        log('ZEPHYR', `  Skipping "${r.name}" — no testCaseKey`);
+        skipped++;
+        continue;
+      }
+
+      // Build comment with expected and actual result
+      let comment = `Status: ${r.status}\n`;
+      if (r.expectedResult) comment += `Expected: ${r.expectedResult}\n`;
+      if (r.actualResult)   comment += `Actual:   ${r.actualResult}\n`;
+      if (r.error)          comment += `Error:    ${r.error}`;
 
       try {
         await axios.put(
-          `${baseUrl}/testexecutions/${r.testCaseKey}`,
+          `${baseUrl}/testexecutions/${zephyrKey}`,
           {
             projectKey,
-            testCycleKey:    cycleId,
+            testCycleKey:    activeCycleId,
             statusName:      statusMap[r.status] || 'Not Executed',
-            comment:         r.error || `Automated run — ${r.status}`,
-            environmentName: 'CI / Edge / Headless',
+            comment:         comment.trim(),
+            environmentName: 'CI / Edge / Headless / Node 24',
           },
           { headers }
         );
-        log('ZEPHYR', `Updated ${r.testCaseKey} -> ${r.status}`);
+        log('ZEPHYR', `  ✓ ${zephyrKey} [${r.status}] — ${r.name}`);
+        updated++;
       } catch (err) {
-        log('ZEPHYR', `Failed to update ${r.testCaseKey}: ${extractError(err)}`);
+        log('ZEPHYR', `  ✗ Failed ${zephyrKey}: ${extractError(err)}`);
       }
     }
 
-    res.json({ message: 'Zephyr updated', updatedCount: results.length, cycleId });
+    log('ZEPHYR', `Done — Updated: ${updated} | Skipped: ${skipped}`);
+    res.json({
+      message:      'Zephyr updated',
+      cycleId:      activeCycleId,
+      updatedCount: updated,
+      skippedCount: skipped,
+      summary,
+    });
 
   } catch (err) {
     log('ZEPHYR-UPDATE', `Error: ${extractError(err)}`);
