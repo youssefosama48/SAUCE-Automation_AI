@@ -614,7 +614,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-${{ github.run_number }}
+          name: test-results-\${{ github.run_number }}
           path: results/test-results.json
           retention-days: 30
 
@@ -622,7 +622,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: console-log-${{ github.run_number }}
+          name: console-log-\${{ github.run_number }}
           path: results/console.log
           retention-days: 7
 

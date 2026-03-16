@@ -66,7 +66,7 @@
   "github": {
     "owner": "youssefosama48",
     "repo":  "SAUCE-Automation_AI",
-    "branch": "master"
+    "branch": "main"
   },
   "mcpServer": {
     "port": 3000,
