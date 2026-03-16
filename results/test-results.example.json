@@ -1,0 +1,78 @@
+{
+  "timestamp": "2025-01-15T10:42:33.000Z",
+  "environment": "CI / Edge / Headless",
+  "cycleId": "CYCLE-001",
+  "summary": {
+    "total": 8,
+    "passed": 7,
+    "failed": 1,
+    "skipped": 0,
+    "duration": 48321
+  },
+  "results": [
+    {
+      "tcId": "TC-001",
+      "testCaseKey": "ZS-001",
+      "name": "Valid user can login successfully",
+      "status": "PASS",
+      "duration": 3421,
+      "error": null
+    },
+    {
+      "tcId": "TC-002",
+      "testCaseKey": "ZS-002",
+      "name": "Inventory page loads correct product count",
+      "status": "PASS",
+      "duration": 2104,
+      "error": null
+    },
+    {
+      "tcId": "TC-003",
+      "testCaseKey": "ZS-003",
+      "name": "Invalid credentials show error message",
+      "status": "PASS",
+      "duration": 3880,
+      "error": null
+    },
+    {
+      "tcId": "TC-004",
+      "testCaseKey": "ZS-004",
+      "name": "Locked user cannot login",
+      "status": "PASS",
+      "duration": 3200,
+      "error": null
+    },
+    {
+      "tcId": "TC-005",
+      "testCaseKey": "ZS-005",
+      "name": "Empty credentials show required field error",
+      "status": "PASS",
+      "duration": 2900,
+      "error": null
+    },
+    {
+      "tcId": "TC-006",
+      "testCaseKey": "ZS-006",
+      "name": "Cart badge updates after adding first product",
+      "status": "FAIL",
+      "duration": 5210,
+      "error": "AssertionError: expected 0 to equal 1 — cart badge not found within timeout"
+    },
+    {
+      "tcId": "TC-007",
+      "testCaseKey": "ZS-007",
+      "name": "Cart badge increments when adding multiple products",
+      "status": "PASS",
+      "duration": 4100,
+      "error": null
+    },
+    {
+      "tcId": "TC-008",
+      "testCaseKey": "ZS-008",
+      "name": "Shopping cart icon navigates to cart page",
+      "status": "PASS",
+      "duration": 3506,
+      "error": null
+    }
+  ]
+}
