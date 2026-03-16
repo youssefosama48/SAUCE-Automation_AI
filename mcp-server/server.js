@@ -1,8 +1,20 @@
 /**
+ * ─────────────────────────────────────────────────────────────────────────────
  * QA Automation MCP Server
  * ─────────────────────────────────────────────────────────────────────────────
- * Receives Jira webhooks → Claude generates test cases → Zephyr Scale Cloud
- * creates tests & cycle → Claude generates Selenium scripts → pushed to GitHub
+ * Full 11-step pipeline:
+ *  1.  Jira story created
+ *  2.  Webhook received by this server
+ *  3.  MCP calls Claude → generate test cases
+ *  4.  Claude returns structured test cases (steps, test data, expected results)
+ *  5.  Create Zephyr test cycle + add test cases with full test script
+ *  6.  MCP reads helpers/driver.js
+ *  7.  MCP calls Claude → generate Selenium Node.js scripts
+ *  8.  Scripts pushed to GitHub → CI/CD triggers automatically
+ *  9.  CI/CD produces results JSON (name, status, expected, actual, duration)
+ * 10.  MCP receives results → updates Zephyr cycle with status + comments
+ * 11.  Zephyr cycle complete, pipeline ends
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const express     = require('express');
@@ -12,19 +24,37 @@ const { Octokit } = require('@octokit/rest');
 const path        = require('path');
 const fs          = require('fs');
 
-const config      = require('../config/pipeline.config.json');
-const secrets     = require('../config/secrets.json');
+const config  = require('../config/pipeline.config.json');
+const secrets = require('../config/secrets.json');
 
-const app         = express();
-app.use(express.json());
+const app       = express();
+app.use(express.json({ limit: '10mb' }));
 
-const anthropic   = new Anthropic({ apiKey: secrets.anthropic.apiKey });
-const octokit     = new Octokit({ auth: secrets.github.token });
+const anthropic = new Anthropic({ apiKey: secrets.anthropic.apiKey });
+const octokit   = new Octokit({ auth: secrets.github.token });
 
-// Deduplication — prevents same story being processed twice
+// ─── Deduplication ────────────────────────────────────────────────────────────
 let processingStories = new Set();
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
+// ─── Step 6 · Load helpers/driver.js at startup ───────────────────────────────
+let DRIVER_JS_CONTENT = '';
+const DRIVER_PATHS = [
+  path.join(__dirname, '../helpers/driver.js'),
+  path.join(__dirname, 'driver.js'),
+  path.join(process.cwd(), 'helpers/driver.js'),
+];
+for (const p of DRIVER_PATHS) {
+  if (fs.existsSync(p)) {
+    DRIVER_JS_CONTENT = fs.readFileSync(p, 'utf8');
+    log('SERVER', `Loaded helpers/driver.js from: ${p}`);
+    break;
+  }
+}
+if (!DRIVER_JS_CONTENT) {
+  console.warn('[SERVER] WARNING: helpers/driver.js not found — scripts will be pushed without it');
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
 
 function log(step, msg, data = '') {
   const ts = new Date().toISOString();
@@ -35,576 +65,478 @@ function slugify(str) {
   return str.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 }
 
-// Extract full error detail from axios errors
 function extractError(err) {
   if (err.response?.data) {
     return typeof err.response.data === 'object'
       ? JSON.stringify(err.response.data)
-      : err.response.data;
+      : String(err.response.data);
   }
   return err.message;
 }
 
-// Zephyr Scale Cloud API headers
 function zephyrHeaders() {
   return {
     Authorization: `Bearer ${secrets.zephyr.apiToken}`,
     'Content-Type': 'application/json',
-    'Accept':       'application/json',
+    Accept:         'application/json',
   };
 }
 
-// ─── Step 1 · Jira webhook endpoint ───────────────────────────────────────────
+function parseJson(raw) {
+  let cleaned = raw.trim()
+    .replace(/^```(?:json)?\n?/, '')
+    .replace(/\n?```$/, '')
+    .trim();
+  const s = cleaned.indexOf('[');
+  const e = cleaned.lastIndexOf(']');
+  if (s === -1 || e === -1) throw new Error('Response does not contain a JSON array');
+  return JSON.parse(cleaned.substring(s, e + 1));
+}
+
+// ─── Step 2 · Webhook endpoint ────────────────────────────────────────────────
 
 app.post('/webhook/jira', async (req, res) => {
   try {
     const { issue } = req.body;
     if (!issue) return res.status(400).json({ error: 'No issue in payload' });
 
-    let key = issue.key;
-
-    // Prevent duplicate processing for the same story
+    const key = issue.key;
     if (processingStories.has(key)) {
-      log('WEBHOOK', `Skipping duplicate webhook for ${key}`);
+      log('WEBHOOK', `Skipping duplicate for ${key}`);
       return res.status(200).json({ message: 'Already processing', storyKey: key });
     }
     processingStories.add(key);
+    setTimeout(() => processingStories.delete(key), 120000);
 
-    // Remove from set after 60 seconds
-    setTimeout(() => processingStories.delete(key), 60000);
-
-    let summary            = issue.fields.summary;
-    let description        = issue.fields.description || '';
-    let acceptanceCriteria = issue.fields.customfield_10016 || '';
-    let issueType          = issue.fields.issuetype?.name  || 'Story';
-    let priority           = issue.fields.priority?.name   || 'Medium';
-
-    let story = {
+    const story = {
       key,
-      summary,
-      description,
-      acceptanceCriteria,
-      issueType,
-      priority,
+      summary:            issue.fields.summary            || '',
+      description:        issue.fields.description        || '',
+      acceptanceCriteria: issue.fields.customfield_10016  || '',
+      issueType:          issue.fields.issuetype?.name    || 'Story',
+      priority:           issue.fields.priority?.name     || 'Medium',
     };
 
-    log('WEBHOOK', `Received Jira story: ${story.key}`, { summary: story.summary });
+    log('WEBHOOK', `Received story: ${key}`, { summary: story.summary });
 
-    // Respond immediately then run pipeline async
-    res.status(202).json({ message: 'Processing started', storyKey: story.key });
+    res.status(202).json({ message: 'Processing started', storyKey: key });
 
-    return runPipeline(story).catch(err => {
-      log('PIPELINE', `Fatal error for ${story.key}: ${extractError(err)}`);
+    runPipeline(story).catch(err => {
+      log('PIPELINE', `Fatal error for ${key}: ${extractError(err)}`);
       processingStories.delete(key);
     });
 
   } catch (err) {
     log('WEBHOOK', `Error: ${extractError(err)}`);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    }
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Main pipeline ─────────────────────────────────────────────────────────────
+// ─── Main pipeline ────────────────────────────────────────────────────────────
 
 async function runPipeline(story) {
-  log('PIPELINE', `Starting for ${story.key}`);
+  log('PIPELINE', `▶ Starting pipeline for ${story.key}`);
 
-  // Step 3-4 · Claude generates test cases
-  let testCases;
-  try {
-    testCases = await generateTestCases(story);
-    log('PIPELINE', `Generated ${testCases.length} test cases`);
-  } catch (err) {
-    throw new Error(`[generateTestCases] ${extractError(err)}`);
-  }
+  // ── Step 3-4 · Claude generates test cases ───────────────────────────────
+  log('PIPELINE', `[3] Calling Claude to generate test cases...`);
+  const testCases = await generateTestCases(story);
+  log('PIPELINE', `[3] ✓ Generated ${testCases.length} test cases`);
 
-  // Step 5 · Create tests in Zephyr Scale Cloud + test cycle
-  let testKeys, cycleId;
-  try {
-    ({ testKeys, cycleId } = await createZephyrTestsAndCycle(story, testCases));
-    log('PIPELINE', `Zephyr cycle created: ${cycleId}`, { testKeys });
-  } catch (err) {
-    throw new Error(`[createZephyrTestsAndCycle] ${extractError(err)}`);
-  }
+  // ── Step 5 · Zephyr — create cycle + test cases with full test script ─────
+  log('PIPELINE', `[5] Creating Zephyr test cycle and test cases...`);
+  const { testKeys, cycleId } = await createZephyrCycleAndTests(story, testCases);
+  log('PIPELINE', `[5] ✓ Cycle: ${cycleId} | Tests: ${testKeys.join(', ')}`);
 
-  // Step 6 · Claude generates Selenium scripts
-  let scripts;
-  try {
-    scripts = await generateSeleniumScripts(testCases, testKeys);
-    log('PIPELINE', `Generated ${scripts.length} Selenium scripts`);
-  } catch (err) {
-    throw new Error(`[generateSeleniumScripts] ${extractError(err)}`);
-  }
+  // ── Step 6-7 · Claude generates Selenium scripts ──────────────────────────
+  log('PIPELINE', `[6] Reading helpers/driver.js and generating Selenium scripts...`);
+  const scripts = await generateSeleniumScripts(testCases, testKeys);
+  log('PIPELINE', `[7] ✓ Generated ${scripts.length} script files`);
 
-  // Step 7 · Push scripts to GitHub
-  try {
-    await pushToGitHub(story, testCases, scripts);
-    log('PIPELINE', 'Scripts pushed to GitHub — Actions will trigger automatically');
-  } catch (err) {
-    throw new Error(`[pushToGitHub] ${extractError(err)}`);
-  }
+  // ── Step 8 · Push to GitHub → CI/CD triggers ─────────────────────────────
+  log('PIPELINE', `[8] Pushing scripts to GitHub...`);
+  await pushToGitHub(story, testCases, testKeys, cycleId, scripts);
+  log('PIPELINE', `[8] ✓ Scripts pushed — GitHub Actions will run automatically`);
 
-  log('PIPELINE', `Completed successfully for ${story.key}`);
+  log('PIPELINE', `✅ Pipeline complete for ${story.key}`);
 }
 
-// ─── Step 3-4 · Claude generates test cases ───────────────────────────────────
+// ─── Step 3-4 · Claude generates test cases ──────────────────────────────────
 
 async function generateTestCases(story) {
-  log('CLAUDE', `Generating test cases for "${story.summary}"`);
+  log('CLAUDE', `Generating test cases for: "${story.summary}"`);
 
-  let prompt = `
-You are a senior QA engineer for a Selenium JavaScript automation project targeting SauceDemo (https://www.saucedemo.com/).
+  const prompt = `
+You are a senior QA engineer. Generate test cases for this Jira story targeting SauceDemo (https://www.saucedemo.com).
 
-Project config:
+Project:
 ${JSON.stringify(config.project, null, 2)}
 
-Page element locators available:
+Locators:
 ${JSON.stringify(config.pages, null, 2)}
 
-Test flows already in config:
-${JSON.stringify(config.test_flows, null, 2)}
-
 Jira Story:
-  Key:         ${story.key}
-  Summary:     ${story.summary}
-  Description: ${story.description}
+  Key:                 ${story.key}
+  Summary:             ${story.summary}
+  Description:         ${story.description}
   Acceptance Criteria: ${story.acceptanceCriteria}
 
-Generate comprehensive test cases for this story. Return ONLY a valid JSON array with no markdown fences.
-Each test case must follow this exact schema:
+Return ONLY a JSON array. Each test case schema:
 {
   "id": "TC-001",
-  "name": "Short descriptive name",
+  "name": "Short descriptive test name",
   "objective": "What this test validates",
-  "preconditions": ["list", "of", "preconditions"],
+  "preconditions": "Preconditions as a single string",
+  "flowRef": "valid_login | invalid_login | add_product_to_cart | other",
+  "priority": "High | Medium | Low",
+  "tags": ["smoke"],
   "steps": [
     {
       "step": 1,
-      "action": "Enter username and password",
-      "testData": { "Username": "standard_user", "Password": "secret_sauce" },
-      "expectedResult": "User is logged in and navigated to inventory page"
+      "action": "Clear human-readable action to perform",
+      "testData": "Specific input values for this step e.g. Username: standard_user, Password: secret_sauce",
+      "expectedResult": "Clear expected outcome after this step"
     }
-  ],
-  "testData": {
-    "username": "standard_user",
-    "password": "secret_sauce"
-  },
-  "tags": ["smoke", "regression"],
-  "priority": "High|Medium|Low",
-  "flowRef": "valid_login|invalid_login|add_product_to_cart|other"
+  ]
 }
 
-IMPORTANT rules for steps:
-- Each step MUST have its own "testData" object with the specific data used in that step only
-- If a step uses a username, include "Username": "standard_user" in that step's testData
-- If a step uses a password, include "Password": "secret_sauce" in that step's testData
-- If a step verifies a URL, include "Expected URL": "/inventory.html" in that step's testData
-- If a step has no specific data, use an empty object {} for testData
-- The "action" field should be a clear human-readable instruction like "Enter username standard_user in the username field"
-- The "expectedResult" should be a clear outcome like "User is redirected to inventory page"
-- Keep step actions and expected results as short readable sentences
+Rules:
+- Max 8 test cases
+- Max 5 steps per test case
+- Cover: happy paths, negative scenarios, edge cases
+- Steps must be human-readable and clear
+- testData per step must be a plain string (not object) e.g. "Username: standard_user"
+- Keep all values short and concise
+- Return raw JSON array only — no markdown, no code fences
+`.trim();
 
-Cover: happy paths, edge cases, boundary conditions, and negative scenarios.
-Use only the locators defined in the page config above.
-IMPORTANT: Generate a maximum of 8 test cases to keep the response concise.
-Keep each test case steps to a maximum of 5 steps.
-Keep all text values short and concise — no long sentences.
-Return the raw JSON array only — no prose, no markdown, no code fences.
-  `.trim();
-
-  let response = await anthropic.messages.create({
+  const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-5',
     max_tokens: 16000,
     messages:   [{ role: 'user', content: prompt }],
   });
 
-  let raw     = response.content[0].text.trim();
-  let cleaned = raw
-    .replace(/^```(?:json)?\n?/, '')
-    .replace(/\n?```$/, '')
-    .trim();
-
-  // Extract only the JSON array
-  let startIndex = cleaned.indexOf('[');
-  let endIndex   = cleaned.lastIndexOf(']');
-  if (startIndex === -1 || endIndex === -1) {
-    throw new Error('Claude did not return a valid JSON array for test cases');
-  }
-  cleaned = cleaned.substring(startIndex, endIndex + 1);
-
-  let testCases = JSON.parse(cleaned);
-
-  // Assign sequential IDs
-  testCases.forEach((tc, i) => {
-    tc.id = `TC-${String(i + 1).padStart(3, '0')}`;
-  });
-
+  const testCases = parseJson(response.content[0].text);
+  testCases.forEach((tc, i) => { tc.id = `TC-${String(i + 1).padStart(3, '0')}`; });
   return testCases;
 }
 
-// ─── Step 5 · Create Zephyr Scale Cloud tests + cycle ─────────────────────────
+// ─── Step 5 · Create Zephyr cycle + test cases with test script ───────────────
 
-async function createZephyrTestsAndCycle(story, testCases) {
+async function createZephyrCycleAndTests(story, testCases) {
   const { baseUrl, projectKey } = config.zephyr;
   const headers = zephyrHeaders();
 
   log('ZEPHYR', `Creating ${testCases.length} test cases in project ${projectKey}`);
+  const testKeys = [];
 
-  let testKeys = [];
-
-  for (let tc of testCases) {
-
-    // Build steps for testScript — included in test case creation payload
-    let scriptSteps = tc.steps.map(s => {
-      // Build readable test data string for this step
-      let stepData = '';
-      if (s.testData && Object.keys(s.testData).length > 0) {
-        stepData = Object.entries(s.testData)
-          .map(([k, v]) => `${k}: ${v}`)
-          .join(' | ');
-      } else if (tc.testData && Object.keys(tc.testData).length > 0) {
-        stepData = Object.entries(tc.testData)
-          .map(([k, v]) => `${k}: ${v}`)
-          .join(' | ');
-      }
-      // Official Zephyr Scale Cloud field names from API docs
-      return {
-        description:    s.action         || '',
-        testData:       stepData          || '',
-        expectedResult: s.expectedResult  || '',
-      };
-    });
-
-    // Step 1 — Create test case WITHOUT steps (name, objective, precondition only)
-    let payload = {
+  for (const tc of testCases) {
+    // ── Create test case (no steps yet) ──────────────────────────────────────
+    const payload = {
       projectKey,
       name:         tc.name,
-      objective:    tc.objective || '',
-      precondition: Array.isArray(tc.preconditions)
-        ? tc.preconditions.join('\n')
-        : tc.preconditions || '',
-      comment:      tc.objective || '',
+      objective:    tc.objective    || '',
+      precondition: tc.preconditions || '',
       estimatedTime: 60000,
       labels:        Array.isArray(tc.tags) ? tc.tags : [],
       priority:      mapPriority(tc.priority),
       status:        'Draft',
     };
 
-    log('ZEPHYR', `  Creating test "${tc.name}" with ${scriptSteps.length} steps`);
-
     let testKey;
     try {
-      let resp = await axios.post(`${baseUrl}/testcases`, payload, { headers });
+      const resp = await axios.post(`${baseUrl}/testcases`, payload, { headers });
       testKey = resp.data.key;
       testKeys.push(testKey);
-      log('ZEPHYR', `Created test: ${testKey} — ${tc.name}`);
+      log('ZEPHYR', `  ✓ Created: ${testKey} — ${tc.name}`);
     } catch (err) {
-      log('ZEPHYR', `Failed to create test "${tc.name}": ${extractError(err)}`);
-      log('ZEPHYR', `Payload sent: ${JSON.stringify(payload)}`);
+      log('ZEPHYR', `  ✗ Failed to create "${tc.name}": ${extractError(err)}`);
       throw err;
     }
 
-    // Step 2 — Add steps to Test Script section
-    // Confirmed correct format: POST /testcases/{key}/teststeps
-    // { mode: "OVERWRITE", items: [{ inline: { description, testData, expectedResult } }] }
-    if (scriptSteps.length > 0) {
+    // ── Add steps to Test Script section ─────────────────────────────────────
+    // Format confirmed: POST /teststeps { mode: "OVERWRITE", items: [{ inline: {...} }] }
+    if (tc.steps?.length) {
+      const stepItems = tc.steps.map(s => ({
+        inline: {
+          description:    s.action         || '',
+          testData:       String(s.testData || ''),
+          expectedResult: s.expectedResult  || '',
+        },
+      }));
+
       try {
         await axios.post(
           `${baseUrl}/testcases/${testKey}/teststeps`,
-          {
-            mode:  'OVERWRITE',
-            items: scriptSteps.map(s => ({
-              inline: {
-                description:    s.description    || '',
-                testData:       s.testData        || '',
-                expectedResult: s.expectedResult  || '',
-              },
-            })),
-          },
+          { mode: 'OVERWRITE', items: stepItems },
           { headers }
         );
-        log('ZEPHYR', `  Added ${scriptSteps.length} steps to ${testKey}`);
+        log('ZEPHYR', `  ✓ Added ${stepItems.length} steps to ${testKey}`);
       } catch (stepErr) {
-        log('ZEPHYR', `  Steps failed for ${testKey}: ${extractError(stepErr)}`);
+        log('ZEPHYR', `  ✗ Steps failed for ${testKey}: ${extractError(stepErr)}`);
+        // Don't throw — test case was created, steps are optional
       }
     }
   }
 
-  // ── Create test cycle (no statusName — uses project default) ──────────────
-  let cyclePayload = {
-    projectKey,
-    name:        `${story.key} — Automated Regression Cycle`,
-    description: `Auto-generated cycle for ${story.summary}`,
-    // statusName intentionally omitted — Zephyr uses the project default status
-  };
-
-  let cycleResp;
+  // ── Create test cycle ─────────────────────────────────────────────────────
+  let cycleId;
   try {
-    cycleResp = await axios.post(`${baseUrl}/testcycles`, cyclePayload, { headers });
+    const cycleResp = await axios.post(
+      `${baseUrl}/testcycles`,
+      {
+        projectKey,
+        name:        `${story.key} — Auto Regression Cycle`,
+        description: `Generated by QA pipeline for: ${story.summary}`,
+      },
+      { headers }
+    );
+    cycleId = cycleResp.data.key || cycleResp.data.id;
+    log('ZEPHYR', `  ✓ Created cycle: ${cycleId}`);
   } catch (err) {
-    log('ZEPHYR', `Failed to create cycle: ${extractError(err)}`);
+    log('ZEPHYR', `  ✗ Failed to create cycle: ${extractError(err)}`);
     throw err;
   }
 
-  let cycleId = cycleResp.data.key || cycleResp.data.id;
-  log('ZEPHYR', `Created cycle: ${cycleId}`);
-
-  // ── Add test cases to cycle — one execution per test case ──────────────────
-  let addedCount = 0;
-  for (let testKey of testKeys) {
+  // ── Add each test case to the cycle as an execution ───────────────────────
+  for (const testKey of testKeys) {
     try {
       await axios.post(
         `${baseUrl}/testexecutions`,
         {
           projectKey,
-          testCycleKey:  cycleId,
-          testCaseKey:   testKey,
-          statusName:    'Not Executed',
+          testCycleKey: cycleId,
+          testCaseKey:  testKey,
+          statusName:   'Not Executed',
         },
         { headers }
       );
-      addedCount++;
-      log('ZEPHYR', `Added ${testKey} to cycle ${cycleId}`);
+      log('ZEPHYR', `  ✓ Added ${testKey} → cycle ${cycleId}`);
     } catch (err) {
-      log('ZEPHYR', `Failed to add ${testKey} to cycle: ${extractError(err)}`);
+      log('ZEPHYR', `  ✗ Failed to add ${testKey} to cycle: ${extractError(err)}`);
       throw err;
     }
   }
-  log('ZEPHYR', `Added ${addedCount} tests to cycle ${cycleId}`);
 
-  // Persist cycleId and testKeys for Step 10
-  let metaPath = path.join(__dirname, '../config/cycle_meta.json');
-  let meta     = fs.existsSync(metaPath)
-    ? JSON.parse(fs.readFileSync(metaPath))
-    : {};
-  meta.cycleId  = cycleId;
-  meta.testKeys = testKeys;
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  // ── Save cycle meta for CI/CD to read ────────────────────────────────────
+  const metaPath = path.join(__dirname, '../config/cycle_meta.json');
+  fs.writeFileSync(metaPath, JSON.stringify({ cycleId, testKeys, storyKey: '' }, null, 2));
 
   return { testKeys, cycleId };
 }
 
-// Map priority string to Zephyr Scale Cloud format
-function mapPriority(priority) {
-  const map = {
-    'High':   'High',
-    'Medium': 'Medium',
-    'Low':    'Low',
-  };
-  return map[priority] || 'Medium';
+function mapPriority(p) {
+  return { High: 'High', Medium: 'Medium', Low: 'Low' }[p] || 'Medium';
 }
 
-// ─── Step 6 · Claude generates Selenium scripts ───────────────────────────────
-
-// Read driver.js content at startup — file must be at helpers/driver.js relative to project root
-// or fall back to the bundled copy
-let DRIVER_JS_CONTENT = '';
-try {
-  // Try to read from the project helpers folder
-  const driverPath = path.join(__dirname, '../helpers/driver.js');
-  DRIVER_JS_CONTENT = fs.readFileSync(driverPath, 'utf8');
-  log('SERVER', 'Loaded helpers/driver.js from project');
-} catch {
-  // Fall back to reading from the same folder as server.js
-  try {
-    const driverPath = path.join(__dirname, 'driver.js');
-    DRIVER_JS_CONTENT = fs.readFileSync(driverPath, 'utf8');
-    log('SERVER', 'Loaded driver.js from mcp-server folder');
-  } catch {
-    log('SERVER', 'WARNING: helpers/driver.js not found — will skip pushing driver file');
-  }
-}
+// ─── Step 6-7 · Claude generates Selenium scripts ────────────────────────────
 
 async function generateSeleniumScripts(testCases, testKeys) {
-  log('CLAUDE', 'Generating Selenium JS automation scripts');
+  log('CLAUDE', 'Generating Selenium Node.js scripts');
 
-  let prompt = `
-You are a senior Selenium automation engineer generating test scripts for SauceDemo.
+  const driverSnippet = DRIVER_JS_CONTENT
+    ? `The helpers/driver.js file provides these exports:
+- buildDriver()  — creates Edge headless WebDriver
+- login(driver, username, password) — logs in and waits for /inventory.html
+- logout(driver) — clicks burger menu → logout
+- runSuite(suiteName, tests) — runs all tests, creates fresh driver per test,
+  saves results to: results-{suite-name}.json at project root
+- SELECTORS — all page locators (login, header, inventory, cart, checkout)
+- BASE_URL — https://www.saucedemo.com`
+    : 'helpers/driver.js is not available — implement driver setup inline.';
 
-The project uses a custom test runner — NOT Mocha. Study this pattern carefully:
+  const prompt = `
+You are a senior Selenium automation engineer generating Node.js test scripts for SauceDemo.
 
-EXACT SCRIPT STRUCTURE — follow this precisely:
-=================================================
+${driverSnippet}
+
+EXACT SCRIPT PATTERN — follow this precisely for every test file:
+\`\`\`javascript
 const { until } = require("selenium-webdriver");
 const { login, logout, runSuite, SELECTORS, BASE_URL } = require("../helpers/driver");
 
 const tests = [
   {
-    name:     "Test name here",
+    name:     "Test case name here",
     expected: "What should happen",
     fn: async (driver) => {
-      // test steps using driver directly
-      // use SELECTORS from helpers/driver
+      // Use driver directly — runSuite creates a fresh driver per test
+      // Use SELECTORS — never hardcode locators
+      // Always return { expectedResult, actualResult }
+      await driver.get(BASE_URL);
+      await driver.wait(until.elementLocated(SELECTORS.login.username), 10000);
+      const url = await driver.getCurrentUrl();
       return {
-        expectedResult: "What should happen",
-        actualResult:   "What actually happened",
+        expectedResult: "Login page is displayed",
+        actualResult:   "Page loaded: " + url,
       };
     },
   },
 ];
 
-runSuite("Suite Name", tests);
-=================================================
+runSuite("Suite Name Tests", tests);
+\`\`\`
 
-HOW runSuite WORKS (do NOT reimplement it):
-- Creates a new driver per test automatically
-- Catches errors and marks test FAIL
-- Saves results to: results-{suite-name-lowercase-hyphenated}.json
-- Results JSON shape per test: { id, name, status, expectedResult, actualResult, executionNote, errorDetail, duration }
-- Overall shape: { suite, browser, environment, startTime, endTime, duration, summary: {total,passed,failed,status}, tests: [...] }
+RESULTS JSON produced by runSuite (saved to results-{suite-name}.json):
+{
+  "suite": "Suite Name Tests",
+  "browser": "Microsoft Edge (headless)",
+  "environment": "Linux (CI)",
+  "startTime": "ISO",
+  "endTime": "ISO",
+  "duration": "Xs",
+  "summary": { "total": N, "passed": N, "failed": N, "status": "ALL PASSED|SOME FAILED" },
+  "tests": [
+    {
+      "id": 1, "name": "...", "status": "PASS|FAIL",
+      "expectedResult": "...", "actualResult": "...",
+      "executionNote": "", "errorDetail": "", "duration": "Xs"
+    }
+  ]
+}
 
-SELECTORS available (from helpers/driver.js):
-- SELECTORS.login.username, .password, .loginBtn, .errorMsg, .errorClose, .loginLogo
-- SELECTORS.header.burgerMenu, .cartIcon, .cartBadge, .menuLogout
-- SELECTORS.inventory.container, .items, .addToCartBtn, .removeBtn, .sortDropdown
-- SELECTORS.cart.container, .items, .checkoutBtn, .continueShopBtn, .removeBtn
-- SELECTORS.checkoutOne.firstName, .lastName, .postalCode, .continueBtn
-- SELECTORS.checkoutTwo.finishBtn, .totalLabel
-- SELECTORS.checkoutComplete.header, .backHomeBtn
+Project credentials:
+- Valid user:    standard_user / secret_sauce
+- Locked user:  locked_out_user / secret_sauce
+- Invalid user: wrong_user / wrong_password
 
-HELPER FUNCTIONS:
-- login(driver, username, password) — logs in and waits for inventory page
-- logout(driver) — opens burger menu and clicks logout
+Test cases to implement (id → Zephyr key → name):
+${testCases.map((tc, i) => `${tc.id} → ${testKeys[i]}: ${tc.name}`).join('\n')}
 
-PROJECT CONFIG:
-- Base URL: https://www.saucedemo.com
-- Valid user: standard_user / secret_sauce
-- Locked user: locked_out_user / secret_sauce
-- Browser: Microsoft Edge headless
-
-Test cases to implement (with their Zephyr keys):
-${testCases.map((tc, i) => `${tc.id} -> ${testKeys[i]}: ${tc.name}`).join('\n')}
-
-Full test cases details:
+Full test case details:
 ${JSON.stringify(testCases, null, 2)}
 
 INSTRUCTIONS:
-1. Group test cases by flowRef into separate test files
-2. Each file: tests/XX-{flowRef}.test.js (e.g. tests/01-login.test.js)
-3. Each test in the array maps to one test case above
-4. Use SELECTORS — never hardcode locators
-5. Each fn must return { expectedResult, actualResult }
-6. Keep tests independent — each gets a fresh driver via runSuite
+1. Group test cases by flowRef into separate files
+2. Filename pattern: tests/01-login.test.js, tests/02-cart.test.js etc.
+3. Each test in the array = one test case from above
+4. Use SELECTORS — never hardcode any CSS/ID locators
+5. Each fn MUST return { expectedResult, actualResult }
+6. Make tests independent — runSuite gives each a fresh driver
+7. DO NOT generate helpers/driver.js — it is provided separately
 
-CRITICAL RULES:
-- Every object MUST have non-empty "filename" starting with tests/
-- Every object MUST have non-empty "content"
-- ONLY generate test files — do NOT generate helpers/driver.js (it is provided separately)
-- Return raw JSON array only — no markdown, no code fences
-
-Return ONLY this JSON array:
+Return ONLY a JSON array:
 [
-  { "filename": "tests/01-login.test.js", "content": "full file content" },
-  { "filename": "tests/02-cart.test.js",  "content": "full file content" }
+  { "filename": "tests/01-login.test.js", "content": "full file source code" }
 ]
-  `.trim();
 
-  let response = await anthropic.messages.create({
+CRITICAL:
+- Every object must have non-empty "filename" starting with tests/
+- Every object must have non-empty "content" with complete valid JS
+- Return raw JSON array only — no markdown, no code fences, no explanation
+`.trim();
+
+  const response = await anthropic.messages.create({
     model:      'claude-sonnet-4-5',
     max_tokens: 16000,
     messages:   [{ role: 'user', content: prompt }],
   });
 
-  let raw     = response.content[0].text.trim();
-  let cleaned = raw
-    .replace(/^```(?:json)?\n?/, '')
-    .replace(/\n?```$/, '')
-    .trim();
+  const scripts = parseJson(response.content[0].text);
 
-  // Extract only the JSON array
-  let startIndex = cleaned.indexOf('[');
-  let endIndex   = cleaned.lastIndexOf(']');
-  if (startIndex === -1 || endIndex === -1) {
-    throw new Error('Claude did not return a valid JSON array for scripts');
-  }
-  cleaned = cleaned.substring(startIndex, endIndex + 1);
-
-  return JSON.parse(cleaned);
+  // Filter any scripts with empty filename or content
+  return scripts.filter(s => s.filename?.trim() && s.content?.trim());
 }
 
-// ─── Step 7 · Push scripts to GitHub ──────────────────────────────────────────
+// ─── Step 8 · Push to GitHub → triggers CI/CD ────────────────────────────────
 
-async function pushToGitHub(story, testCases, scripts) {
+async function pushToGitHub(story, testCases, testKeys, cycleId, scripts) {
   const { owner, repo, branch } = config.github;
-  let commitBranch = `qa/auto-${slugify(story.key)}-${Date.now()}`;
+  const commitBranch = `qa/auto-${slugify(story.key)}-${Date.now()}`;
 
-  log('GITHUB', `Pushing to ${owner}/${repo} on branch ${commitBranch}`);
+  log('GITHUB', `Pushing to ${owner}/${repo} → branch ${commitBranch}`);
 
-  // Get base SHA of target branch
-  let { data: ref } = await octokit.git.getRef({
-    owner, repo, ref: `heads/${branch}`,
-  });
-  let baseSha = ref.object.sha;
+  // Get base SHA
+  const { data: ref } = await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+  const baseSha = ref.object.sha;
 
-  // Filter out any scripts with empty or invalid filenames
-  let validScripts = scripts.filter(s => s.filename && s.filename.trim() !== '' && s.content && s.content.trim() !== '');
-  log('GITHUB', `Valid scripts to push: ${validScripts.length} of ${scripts.length}`);
+  const treeItems = [];
 
-  // Build tree of files — scripts generated by Claude
-  let treeItems = await Promise.all(
-    validScripts.map(async ({ filename, content }) => {
-      let { data: blob } = await octokit.git.createBlob({
-        owner, repo,
-        content:  Buffer.from(content).toString('base64'),
-        encoding: 'base64',
-      });
-      return { path: filename, mode: '100644', type: 'blob', sha: blob.sha };
-    })
-  );
+  // ── 1. Test scripts generated by Claude ───────────────────────────────────
+  for (const { filename, content } of scripts) {
+    const { data: blob } = await octokit.git.createBlob({
+      owner, repo,
+      content:  Buffer.from(content).toString('base64'),
+      encoding: 'base64',
+    });
+    treeItems.push({ path: filename, mode: '100644', type: 'blob', sha: blob.sha });
+    log('GITHUB', `  + ${filename}`);
+  }
 
-  // Add generated test cases JSON artifact
-  let { data: tcBlob } = await octokit.git.createBlob({
-    owner, repo,
-    content:  Buffer.from(JSON.stringify(testCases, null, 2)).toString('base64'),
-    encoding: 'base64',
-  });
-  treeItems.push({
-    path: 'config/generated_test_cases.json',
-    mode: '100644',
-    type: 'blob',
-    sha:  tcBlob.sha,
-  });
-
-  // Always push helpers/driver.js — only if content was loaded
+  // ── 2. helpers/driver.js ──────────────────────────────────────────────────
   if (DRIVER_JS_CONTENT) {
-    let { data: driverBlob } = await octokit.git.createBlob({
+    const { data: blob } = await octokit.git.createBlob({
       owner, repo,
       content:  Buffer.from(DRIVER_JS_CONTENT).toString('base64'),
       encoding: 'base64',
     });
-    treeItems.push({
-      path: 'helpers/driver.js',
-      mode: '100644',
-      type: 'blob',
-      sha:  driverBlob.sha,
-    });
-    log('GITHUB', 'Added helpers/driver.js to push');
-  } else {
-    log('GITHUB', 'WARNING: helpers/driver.js not pushed — file not found on server');
+    treeItems.push({ path: 'helpers/driver.js', mode: '100644', type: 'blob', sha: blob.sha });
+    log('GITHUB', '  + helpers/driver.js');
   }
 
-  // Push cycle_meta.json so Actions can read the cycleId
-  let cycleMeta = { cycleId: '', testKeys: [] };
-  try {
-    const metaPath = require('path').join(__dirname, '../config/cycle_meta.json');
-    cycleMeta = JSON.parse(require('fs').readFileSync(metaPath));
-  } catch { /* use defaults */ }
-  let { data: metaBlob } = await octokit.git.createBlob({
+  // ── 3. config/cycle_meta.json (so CI can read cycleId) ───────────────────
+  const meta = { cycleId, testKeys, storyKey: story.key };
+  const { data: metaBlob } = await octokit.git.createBlob({
     owner, repo,
-    content:  Buffer.from(JSON.stringify(cycleMeta, null, 2)).toString('base64'),
+    content:  Buffer.from(JSON.stringify(meta, null, 2)).toString('base64'),
     encoding: 'base64',
   });
-  treeItems.push({
-    path: 'config/cycle_meta.json',
-    mode: '100644',
-    type: 'blob',
-    sha:  metaBlob.sha,
+  treeItems.push({ path: 'config/cycle_meta.json', mode: '100644', type: 'blob', sha: metaBlob.sha });
+  log('GITHUB', '  + config/cycle_meta.json');
+
+  // ── 4. package.json ───────────────────────────────────────────────────────
+  const pkgJson = {
+    name: 'saucedemo-qa-automation',
+    version: '1.0.0',
+    engines: { node: '>=24.0.0' },
+    scripts: {
+      test: 'for f in tests/*.test.js; do node "$f" || true; done',
+    },
+    dependencies: {
+      'selenium-webdriver': '^4.21.0',
+    },
+  };
+  const { data: pkgBlob } = await octokit.git.createBlob({
+    owner, repo,
+    content:  Buffer.from(JSON.stringify(pkgJson, null, 2)).toString('base64'),
+    encoding: 'base64',
+  });
+  treeItems.push({ path: 'package.json', mode: '100644', type: 'blob', sha: pkgBlob.sha });
+  log('GITHUB', '  + package.json');
+
+  // ── 5. .github/workflows/qa-automation.yml ────────────────────────────────
+  const workflow = buildWorkflow();
+  const { data: wfBlob } = await octokit.git.createBlob({
+    owner, repo,
+    content:  Buffer.from(workflow).toString('base64'),
+    encoding: 'base64',
+  });
+  treeItems.push({ path: '.github/workflows/qa-automation.yml', mode: '100644', type: 'blob', sha: wfBlob.sha });
+  log('GITHUB', '  + .github/workflows/qa-automation.yml');
+
+  // ── Commit + branch + PR ──────────────────────────────────────────────────
+  const { data: tree }   = await octokit.git.createTree({ owner, repo, base_tree: baseSha, tree: treeItems });
+  const { data: commit } = await octokit.git.createCommit({
+    owner, repo,
+    message: `[QA-AUTO] ${story.key}: ${testCases.length} tests generated by Claude`,
+    tree:    tree.sha,
+    parents: [baseSha],
+  });
+  await octokit.git.createRef({ owner, repo, ref: `refs/heads/${commitBranch}`, sha: commit.sha });
+  await octokit.pulls.create({
+    owner, repo,
+    title: `[QA-AUTO] ${story.key} — ${testCases.length} Selenium tests`,
+    body:  `**Story:** ${story.key} — ${story.summary}\n\n**Tests generated:** ${testCases.length}\n**Zephyr Cycle:** ${cycleId}\n\nMerging this PR triggers GitHub Actions CI.`,
+    head:  commitBranch,
+    base:  branch,
   });
 
-  // Add GitHub Actions workflow file — triggers CI on push/merge
-  const workflowContent = `name: QA Automation — Selenium Edge
+  log('GITHUB', `✓ PR created on branch ${commitBranch}`);
+}
+
+// ─── GitHub Actions workflow ──────────────────────────────────────────────────
+
+function buildWorkflow() {
+  return `name: QA Automation — Selenium Edge
 
 on:
   push:
@@ -638,135 +570,121 @@ jobs:
           sudo sh -c 'echo "deb [arch=amd64] https://packages.microsoft.com/repos/edge stable main" > /etc/apt/sources.list.d/microsoft-edge.list'
           sudo apt-get update
           sudo apt-get install -y microsoft-edge-stable
-          echo "Edge version: $(microsoft-edge --version)"
+          echo "Edge installed: $(microsoft-edge --version)"
 
       - name: Install EdgeDriver
         run: |
           npm install -g edgedriver
           edgedriver --version
 
-      - name: Install dependencies
+      - name: Install project dependencies
         run: npm install
 
       - name: Create results directory
         run: mkdir -p results
 
-      - name: Run all test suites
+      - name: Run all Selenium test suites
+        id: run_tests
         run: |
-          mkdir -p results
-          echo "Running all test files in tests/ folder..."
+          echo "Running test files..."
           for f in tests/*.test.js; do
-            echo "--- Running: $f ---"
+            echo "=== Running: $f ==="
             node "$f" 2>&1 || true
           done
-          echo "All suites completed"
+          echo "All test suites finished"
 
-      - name: Collect and merge all results JSON files
+      - name: Collect and merge results into test-results.json
         if: always()
         run: |
           mkdir -p results
-          echo "Collecting results JSON files..."
-          ls -la results-*.json 2>/dev/null || echo "No results files at root"
+          node << 'SCRIPT'
+          const fs = require('fs');
+          const path = require('path');
 
-          # Move any results files from root to results/
-          mv results-*.json results/ 2>/dev/null || true
+          // Collect all results-*.json files from project root
+          const root = process.cwd();
+          const files = fs.readdirSync(root).filter(f => f.startsWith('results-') && f.endsWith('.json'));
+          console.log('Results files found:', files);
 
-          # List what we have
-          ls -la results/ || true
+          let allTests   = [];
+          let totPassed  = 0;
+          let totFailed  = 0;
 
-          # Merge all results-*.json into one combined file
-          if ls results/results-*.json 1> /dev/null 2>&1; then
-            echo "Merging results files..."
-            node -e "
-              const fs = require('fs');
-              const files = fs.readdirSync('results').filter(f => f.startsWith('results-') && f.endsWith('.json'));
-              console.log('Found files:', files);
+          for (const file of files) {
+            try {
+              const data = JSON.parse(fs.readFileSync(path.join(root, file)));
+              const tests = data.tests || [];
+              allTests  = allTests.concat(tests);
+              totPassed += data.summary?.passed || 0;
+              totFailed += data.summary?.failed || 0;
+              // Move to results/
+              fs.copyFileSync(path.join(root, file), path.join(root, 'results', file));
+            } catch (e) {
+              console.error('Could not parse', file, e.message);
+            }
+          }
 
-              let allTests = [];
-              let totalPassed = 0;
-              let totalFailed = 0;
+          // Read cycleId
+          let cycleId = 'unknown';
+          try {
+            cycleId = JSON.parse(fs.readFileSync('config/cycle_meta.json')).cycleId || 'unknown';
+          } catch {}
 
-              for (const file of files) {
-                const data = JSON.parse(fs.readFileSync('results/' + file));
-                allTests = allTests.concat(data.tests || []);
-                totalPassed += data.summary?.passed || 0;
-                totalFailed += data.summary?.failed || 0;
-              }
+          const combined = {
+            timestamp:   new Date().toISOString(),
+            environment: 'CI / Edge / Headless / Node 24',
+            cycleId,
+            summary: {
+              total:   allTests.length,
+              passed:  totPassed,
+              failed:  totFailed,
+              skipped: 0,
+              status:  totFailed === 0 ? 'ALL PASSED' : 'SOME FAILED',
+            },
+            results: allTests.map(t => ({
+              name:           t.name,
+              status:         t.status,
+              expectedResult: t.expectedResult || '',
+              actualResult:   t.actualResult   || '',
+              duration:       t.duration       || '0s',
+              error:          t.errorDetail    || null,
+            })),
+          };
 
-              // Read cycleId from config
-              let cycleId = 'unknown';
-              try {
-                const meta = JSON.parse(fs.readFileSync('config/cycle_meta.json'));
-                cycleId = meta.cycleId || 'unknown';
-              } catch(e) {}
-
-              const combined = {
-                timestamp:   new Date().toISOString(),
-                environment: 'CI / Edge / Headless / Node 24',
-                cycleId,
-                summary: {
-                  total:   allTests.length,
-                  passed:  totalPassed,
-                  failed:  totalFailed,
-                  skipped: 0,
-                  status:  totalFailed === 0 ? 'ALL PASSED' : 'SOME FAILED'
-                },
-                results: allTests.map(t => ({
-                  tcId:           t.id || '',
-                  testCaseKey:    t.zephyrKey || '',
-                  name:           t.name,
-                  status:         t.status,
-                  expectedResult: t.expectedResult || '',
-                  actualResult:   t.actualResult   || '',
-                  duration:       t.duration       || '0s',
-                  error:          t.errorDetail    || null
-                }))
-              };
-
-              fs.writeFileSync('results/test-results.json', JSON.stringify(combined, null, 2));
-              console.log('Combined results written: ' + allTests.length + ' tests');
-            "
-          else
-            echo "No results files found — creating fallback"
-            TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            node -e "
-              const fs = require('fs');
-              let cycleId = 'unknown';
-              try { cycleId = JSON.parse(fs.readFileSync('config/cycle_meta.json')).cycleId || 'unknown'; } catch(e) {}
-              const fallback = {
-                timestamp: new Date().toISOString(),
-                environment: 'CI / Edge / Headless / Node 24',
-                cycleId,
-                summary: { total: 0, passed: 0, failed: 0, skipped: 0, status: 'NO TESTS RAN' },
-                results: [],
-                error: 'No test result files were generated'
-              };
-              fs.mkdirSync('results', { recursive: true });
-              fs.writeFileSync('results/test-results.json', JSON.stringify(fallback, null, 2));
-              console.log('Fallback results written');
-            "
-          fi
+          fs.writeFileSync('results/test-results.json', JSON.stringify(combined, null, 2));
+          console.log('Merged results written:', allTests.length, 'tests');
+          SCRIPT
 
       - name: Print results summary
         if: always()
         run: |
-          echo "======================================"
-          echo "       TEST RESULTS SUMMARY"
-          echo "======================================"
+          echo "============================================"
+          echo "          TEST RESULTS SUMMARY"
+          echo "============================================"
           if [ -f results/test-results.json ]; then
-            jq -r '"Cycle ID : " + .cycleId' results/test-results.json || true
-            jq -r '"Total    : " + (.summary.total | tostring)' results/test-results.json || true
-            jq -r '"Passed   : " + (.summary.passed | tostring)' results/test-results.json || true
-            jq -r '"Failed   : " + (.summary.failed | tostring)' results/test-results.json || true
-            jq -r '"Status   : " + .summary.status' results/test-results.json || true
-            echo "--------------------------------------"
-            jq -r '.results[] | "[" + .status + "] " + .name' results/test-results.json || echo "No results"
-            echo "======================================"
+            node -e "
+              const r = JSON.parse(require('fs').readFileSync('results/test-results.json'));
+              console.log('Cycle ID : ' + r.cycleId);
+              console.log('Total    : ' + r.summary.total);
+              console.log('Passed   : ' + r.summary.passed);
+              console.log('Failed   : ' + r.summary.failed);
+              console.log('Status   : ' + r.summary.status);
+              console.log('--------------------------------------------');
+              (r.results || []).forEach(t => {
+                const icon = t.status === 'PASS' ? '✓' : '✗';
+                console.log(icon + ' [' + t.status + '] ' + t.name);
+                if (t.status === 'FAIL') {
+                  console.log('   Expected: ' + t.expectedResult);
+                  console.log('   Actual:   ' + t.actualResult);
+                }
+              });
+              console.log('============================================');
+            "
           else
-            echo "No results/test-results.json found"
+            echo "No test-results.json found"
           fi
 
-      - name: Upload results JSON artifact
+      - name: Upload test-results.json artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -782,158 +700,101 @@ jobs:
           path: results/
           retention-days: 7
 
-      - name: Send results to MCP server → update Zephyr cycle
+      - name: Step 10 — Send results to MCP server → update Zephyr cycle
         if: always()
         run: |
           if [ -f results/test-results.json ] && [ -n "\${{ secrets.MCP_SERVER_URL }}" ]; then
-            echo "Sending results to MCP server for Zephyr update..."
-            cat results/test-results.json
-            HTTP_STATUS=$(curl -s -o /tmp/zephyr_resp.json -w "%{http_code}" \
-              -X POST "\${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \
-              -H "Content-Type: application/json" \
+            echo "Sending results to MCP server..."
+            HTTP_STATUS=$(curl -s -o /tmp/zephyr_response.json -w "%{http_code}" \\
+              -X POST "\${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \\
+              -H "Content-Type: application/json" \\
               -d @results/test-results.json)
-            echo "MCP response (HTTP $HTTP_STATUS):"
-            cat /tmp/zephyr_resp.json
+            echo "Response HTTP \$HTTP_STATUS:"
+            cat /tmp/zephyr_response.json
           else
-            echo "Skipping Zephyr update — no results file or MCP_SERVER_URL not set"
+            echo "Skipping — MCP_SERVER_URL not set or no results file"
           fi
 
-      - name: Fail workflow if tests failed
+      - name: Fail if any tests failed
         if: always()
         run: |
           if [ -f results/test-results.json ]; then
-            FAILED=$(jq '.summary.failed // 0' results/test-results.json)
-            if [ "$FAILED" -gt "0" ]; then
-              echo "$FAILED test(s) FAILED — see results above"
-              exit 1
-            fi
+            node -e "
+              const r = JSON.parse(require('fs').readFileSync('results/test-results.json'));
+              if (r.summary.failed > 0) {
+                console.error(r.summary.failed + ' test(s) FAILED');
+                process.exit(1);
+              }
+            "
           fi
 `;
-  let { data: wfBlob } = await octokit.git.createBlob({
-    owner, repo,
-    content:  Buffer.from(workflowContent).toString('base64'),
-    encoding: 'base64',
-  });
-  treeItems.push({
-    path: '.github/workflows/qa-automation.yml',
-    mode: '100644',
-    type: 'blob',
-    sha:  wfBlob.sha,
-  });
-
-  // Add package.json
-  const packageJson = {
-    name: "saucedemo-qa-automation",
-    version: "1.0.0",
-    engines: {
-      node: ">=24.0.0"
-    },
-    scripts: {
-      test: "for f in tests/*.test.js; do node $f; done"
-    },
-    dependencies: {
-      "selenium-webdriver": "^4.21.0"
-    }
-  };
-  let { data: pkgBlob } = await octokit.git.createBlob({
-    owner, repo,
-    content:  Buffer.from(JSON.stringify(packageJson, null, 2)).toString('base64'),
-    encoding: 'base64',
-  });
-  treeItems.push({
-    path: 'package.json',
-    mode: '100644',
-    type: 'blob',
-    sha:  pkgBlob.sha,
-  });
-
-  let { data: tree } = await octokit.git.createTree({
-    owner, repo, base_tree: baseSha, tree: treeItems,
-  });
-
-  let { data: commit } = await octokit.git.createCommit({
-    owner, repo,
-    message: `[QA-AUTO] ${story.key}: ${testCases.length} tests generated by Claude`,
-    tree:    tree.sha,
-    parents: [baseSha],
-  });
-
-  // Create new branch
-  await octokit.git.createRef({
-    owner, repo,
-    ref: `refs/heads/${commitBranch}`,
-    sha: commit.sha,
-  });
-
-  // Open PR for team review
-  await octokit.pulls.create({
-    owner, repo,
-    title: `[QA-AUTO] ${story.key}: Selenium tests — ${testCases.length} cases`,
-    body:  `Auto-generated by the QA AI pipeline.\n\n**Story:** ${story.key} — ${story.summary}\n\n**Test cases:** ${testCases.length}\n\nMerging this PR will trigger the GitHub Actions CI run.`,
-    head:  commitBranch,
-    base:  branch,
-  });
-
-  log('GITHUB', `PR created for branch ${commitBranch}`);
 }
 
-// ─── Step 10 · Update Zephyr with test results ────────────────────────────────
+// ─── Step 10 · Receive results from CI → update Zephyr ───────────────────────
 
 app.post('/zephyr/update-results', async (req, res) => {
   try {
-    // Accept full results object from GitHub Actions
-    const body = req.body;
-    const results  = body.results || [];
-    const cycleId  = body.cycleId || null;
-    const summary  = body.summary || {};
+    const body    = req.body;
+    const results = body.results || [];
+    const summary = body.summary || {};
 
-    if (!results.length) return res.status(400).json({ error: 'No results provided' });
+    if (!results.length) return res.status(400).json({ error: 'No results in payload' });
 
-    // Use cycleId from request body first, fall back to cycle_meta.json
-    let activeCycleId = cycleId;
-    if (!activeCycleId) {
+    // Get cycleId from body first, fall back to cycle_meta.json
+    let cycleId = body.cycleId || null;
+    if (!cycleId) {
       try {
-        let metaPath = path.join(__dirname, '../config/cycle_meta.json');
-        let meta     = JSON.parse(fs.readFileSync(metaPath));
-        activeCycleId = meta.cycleId;
-      } catch { /* use null */ }
+        const meta = JSON.parse(fs.readFileSync(path.join(__dirname, '../config/cycle_meta.json')));
+        cycleId = meta.cycleId;
+      } catch { /* ignore */ }
     }
-    if (!activeCycleId) return res.status(400).json({ error: 'No cycleId found in request or cycle_meta.json' });
+    if (!cycleId) return res.status(400).json({ error: 'cycleId not found' });
+
+    // Load testKeys from meta to match results by index
+    let testKeys = [];
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(__dirname, '../config/cycle_meta.json')));
+      testKeys = meta.testKeys || [];
+    } catch { /* ignore */ }
 
     const { baseUrl, projectKey } = config.zephyr;
     const headers = zephyrHeaders();
+    const statusMap = { PASS: 'Pass', FAIL: 'Fail', SKIP: 'Blocked' };
 
-    log('ZEPHYR', `Updating ${results.length} results on cycle ${activeCycleId}`);
+    log('ZEPHYR', `Updating ${results.length} test results on cycle ${cycleId}`);
     log('ZEPHYR', `Summary — Total: ${summary.total} | Passed: ${summary.passed} | Failed: ${summary.failed}`);
 
-    let statusMap = { 'PASS': 'Pass', 'FAIL': 'Fail', 'SKIP': 'Blocked' };
     let updated = 0;
     let skipped = 0;
 
-    for (let r of results) {
-      // Match test to Zephyr key — results may have testCaseKey or we match by name
-      let zephyrKey = r.testCaseKey || null;
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
 
+      // Match to Zephyr test key by position (same order as created)
+      const zephyrKey = r.testCaseKey || testKeys[i] || null;
       if (!zephyrKey) {
-        log('ZEPHYR', `  Skipping "${r.name}" — no testCaseKey`);
+        log('ZEPHYR', `  Skipping result ${i + 1} "${r.name}" — no Zephyr key`);
         skipped++;
         continue;
       }
 
-      // Build comment with expected and actual result
-      let comment = `Status: ${r.status}\n`;
-      if (r.expectedResult) comment += `Expected: ${r.expectedResult}\n`;
-      if (r.actualResult)   comment += `Actual:   ${r.actualResult}\n`;
-      if (r.error)          comment += `Error:    ${r.error}`;
+      // Build rich comment with expected and actual result
+      const comment = [
+        `Status: ${r.status}`,
+        r.expectedResult ? `Expected: ${r.expectedResult}` : null,
+        r.actualResult   ? `Actual:   ${r.actualResult}`   : null,
+        r.duration       ? `Duration: ${r.duration}`       : null,
+        r.error          ? `Error:    ${r.error}`           : null,
+      ].filter(Boolean).join('\n');
 
       try {
         await axios.put(
           `${baseUrl}/testexecutions/${zephyrKey}`,
           {
             projectKey,
-            testCycleKey:    activeCycleId,
+            testCycleKey:    cycleId,
             statusName:      statusMap[r.status] || 'Not Executed',
-            comment:         comment.trim(),
+            comment:         comment,
             environmentName: 'CI / Edge / Headless / Node 24',
           },
           { headers }
@@ -945,30 +806,29 @@ app.post('/zephyr/update-results', async (req, res) => {
       }
     }
 
-    log('ZEPHYR', `Done — Updated: ${updated} | Skipped: ${skipped}`);
-    res.json({
-      message:      'Zephyr updated',
-      cycleId:      activeCycleId,
-      updatedCount: updated,
-      skippedCount: skipped,
-      summary,
-    });
+    log('ZEPHYR', `✅ Done — Updated: ${updated} | Skipped: ${skipped}`);
+    res.json({ message: 'Zephyr cycle updated', cycleId, updated, skipped, summary });
 
   } catch (err) {
     log('ZEPHYR-UPDATE', `Error: ${extractError(err)}`);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    }
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Health check ──────────────────────────────────────────────────────────────
+// ─── Health check ─────────────────────────────────────────────────────────────
 
-app.get('/health', (_, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
+app.get('/health', (_, res) => res.json({
+  status:    'ok',
+  ts:        new Date().toISOString(),
+  driverJs:  DRIVER_JS_CONTENT ? 'loaded' : 'missing',
+}));
 
-// ─── Start ─────────────────────────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => log('SERVER', `MCP server running on port ${PORT}`));
+app.listen(PORT, () => {
+  log('SERVER', `MCP server running on port ${PORT}`);
+  log('SERVER', `driver.js: ${DRIVER_JS_CONTENT ? '✓ loaded' : '✗ NOT FOUND — place at helpers/driver.js'}`);
+});
 
 module.exports = app;
