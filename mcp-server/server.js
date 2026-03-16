@@ -901,109 +901,132 @@ app.post('/zephyr/update-results', async (req, res) => {
     const updateLog = [];
 
     // ── Step 1 · Get all executions in the cycle ──────────────────────────────
+    // Zephyr Scale Cloud API: GET /testexecutions?testCycle={key}&projectKey={key}
     let cycleExecutions = [];
     try {
-      const execResp = await axios.get(
-        `${baseUrl}/testexecutions?testCycle=${cycleId}&projectKey=${projectKey}&maxResults=200`,
-        { headers }
-      );
-      cycleExecutions = execResp.data?.values || execResp.data?.results || [];
+      // Try both query parameter formats used by Zephyr Scale Cloud
+      const url1 = `${baseUrl}/testexecutions?testCycle=${cycleId}&projectKey=${projectKey}&maxResults=200`;
+      const url2 = `${baseUrl}/testexecutions?testCycleKey=${cycleId}&projectKey=${projectKey}&maxResults=200`;
+
+      let execResp;
+      try {
+        execResp = await axios.get(url1, { headers });
+        log('ZEPHYR', `Fetched executions using: testCycle param`);
+      } catch {
+        execResp = await axios.get(url2, { headers });
+        log('ZEPHYR', `Fetched executions using: testCycleKey param`);
+      }
+
+      const raw = execResp.data;
+      log('ZEPHYR', `Raw executions response: ${JSON.stringify(raw).substring(0, 500)}`);
+
+      cycleExecutions = raw?.values || raw?.results || (Array.isArray(raw) ? raw : []);
       log('ZEPHYR', `Found ${cycleExecutions.length} executions in cycle ${cycleId}`);
+
+      if (cycleExecutions.length > 0) {
+        log('ZEPHYR', `Execution[0] full structure: ${JSON.stringify(cycleExecutions[0])}`);
+        log('ZEPHYR', `Execution[0] keys: ${Object.keys(cycleExecutions[0]).join(', ')}`);
+      }
     } catch (err) {
-      log('ZEPHYR', `Could not fetch cycle executions: ${extractError(err)} — will use testKeys by index`);
+      log('ZEPHYR', `Could not fetch executions: ${extractError(err)}`);
     }
 
     // ── Step 2-7 · Process each test result ───────────────────────────────────
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
-
-      log('ZEPHYR', `\n── [${i + 1}/${results.length}] Processing: "${r.name}" → ${r.status}`);
-
-      // Find the Zephyr test case key — match by index from testKeys
       const testCaseKey = r.testCaseKey || testKeys[i] || null;
+
+      log('ZEPHYR', `\n── [${i + 1}/${results.length}] ${testCaseKey} "${r.name}" → ${r.status}`);
+
       if (!testCaseKey) {
-        log('ZEPHYR', `  Skipping — no Zephyr key for result ${i + 1} "${r.name}"`);
+        log('ZEPHYR', `  SKIP — no Zephyr key for result ${i + 1}`);
         skipped++;
         continue;
       }
 
-      // Find the execution ID for this test case in the cycle
-      let executionKey = null;
-      const matchedExec = cycleExecutions.find(e =>
-        e.testCase?.key === testCaseKey ||
-        e.testCaseKey   === testCaseKey ||
-        e.key           === testCaseKey
-      );
-      if (matchedExec) {
-        executionKey = matchedExec.key || matchedExec.id;
-        log('ZEPHYR', `  Matched execution: ${executionKey} for test case ${testCaseKey}`);
-      } else {
-        executionKey = testCaseKey;
-        log('ZEPHYR', `  Using testCaseKey directly: ${testCaseKey}`);
-      }
+      // ── Find the execution record for this test case ────────────────────────
+      // The execution has its own ID — different from testCaseKey
+      let executionId = null;
 
-      // ── Step 3 · Fetch test steps from Zephyr to match actual results ────────
-      let existingSteps = [];
-      try {
-        const stepsResp = await axios.get(
-          `${baseUrl}/testcases/${testCaseKey}/teststeps`,
-          { headers }
-        );
-        existingSteps = stepsResp.data?.values
-          || stepsResp.data?.steps
-          || stepsResp.data
-          || [];
-        if (!Array.isArray(existingSteps)) existingSteps = [];
-        log('ZEPHYR', `  Fetched ${existingSteps.length} existing steps for ${testCaseKey}`);
-      } catch (err) {
-        log('ZEPHYR', `  Could not fetch steps for ${testCaseKey}: ${extractError(err)}`);
-      }
-
-      // ── Step 4 · Build comment with full execution details ───────────────────
-      const commentLines = [
-        '=== Automated Test Execution Result ===',
-        'Test Case  : ' + r.name,
-        'Status     : ' + r.status + (r.status === 'PASS' ? ' ✓' : ' ✗'),
-        'Duration   : ' + (r.duration || 'N/A'),
-        '',
-        'Expected Result:',
-        r.expectedResult || '(not recorded)',
-        '',
-        'Actual Result:',
-        r.actualResult   || '(not recorded)',
-      ];
-      if (r.error) {
-        commentLines.push('', 'Error Details:', r.error);
-      }
-      commentLines.push('', '=== End of Result ===');
-      const comment = commentLines.join('\n');
-
-      // ── Step 5 · Update execution status, comment, and duration ─────────────
-      try {
-        // Convert duration string like "3.45s" to milliseconds
-        let durationMs = 0;
-        if (r.duration) {
-          const match = String(r.duration).match(/([\d.]+)/);
-          if (match) durationMs = Math.round(parseFloat(match[1]) * 1000);
+      if (cycleExecutions.length > 0) {
+        // Try to match by testCase.key (most common Zephyr response structure)
+        const exec = cycleExecutions.find(e => {
+          const tcKey = e.testCase?.key || e.testCaseKey || e.testcase?.key || '';
+          return tcKey === testCaseKey;
+        });
+        if (exec) {
+          // Use the execution's own ID/key for the PUT call
+          executionId = exec.id || exec.key || exec.executionId || null;
+          log('ZEPHYR', `  Found execution: id=${executionId} for testCase=${testCaseKey}`);
+        } else {
+          log('ZEPHYR', `  No execution found in cycle for ${testCaseKey} — will try direct testCase update`);
         }
+      }
 
-        await axios.put(
-          `${baseUrl}/testexecutions/${executionKey}`,
-          {
-            projectKey,
-            testCycleKey:    cycleId,
-            statusName:      statusMap[r.status] || 'Not Executed',
-            comment:         comment,
-            executionTime:   durationMs,
-            environmentName: 'CI / Edge / Headless / Node 24',
-            executedById:    secrets.zephyr.assignee || undefined,
-          },
-          { headers }
-        );
-        log('ZEPHYR', `  ✓ Status updated: ${executionKey} → ${r.status}`);
-        updated++;
-      } catch (err) {
-        log('ZEPHYR', `  ✗ Status update failed for ${executionKey}: ${extractError(err)}`);
+      // ── Step 4 · Build rich comment ─────────────────────────────────────────
+      const comment = [
+        '=== Automated Test Execution Result ===',
+        'Test     : ' + r.name,
+        'Status   : ' + r.status + (r.status === 'PASS' ? ' ✓' : ' ✗'),
+        'Duration : ' + (r.duration || 'N/A'),
+        '',
+        'Expected : ' + (r.expectedResult || '(not recorded)'),
+        'Actual   : ' + (r.actualResult   || '(not recorded)'),
+        r.error ? ('Error    : ' + r.error) : null,
+        '',
+        '=== End ===',
+      ].filter(Boolean).join('\n');
+
+      // ── Step 5 · Convert duration ────────────────────────────────────────────
+      let durationMs = 0;
+      if (r.duration) {
+        const m = String(r.duration).match(/([\d.]+)/);
+        if (m) durationMs = Math.round(parseFloat(m[1]) * 1000);
+      }
+
+      const updatePayload = {
+        projectKey,
+        testCycleKey:    cycleId,
+        statusName:      statusMap[r.status] || 'Not Executed',
+        comment,
+        executionTime:   durationMs,
+        environmentName: 'CI / Edge / Headless / Node 24',
+      };
+
+      // ── Step 6 · PUT the execution update ────────────────────────────────────
+      // Strategy A: use execution ID from the cycle executions list
+      if (executionId) {
+        try {
+          await axios.put(
+            `${baseUrl}/testexecutions/${executionId}`,
+            updatePayload,
+            { headers }
+          );
+          log('ZEPHYR', `  ✓ Updated execution ${executionId} [${r.status}]`);
+          updated++;
+        } catch (err) {
+          log('ZEPHYR', `  ✗ PUT /testexecutions/${executionId} failed: ${extractError(err)}`);
+          // Fall through to Strategy B
+          executionId = null;
+        }
+      }
+
+      // Strategy B: POST a new execution result directly against the test case
+      if (!executionId) {
+        try {
+          await axios.post(
+            `${baseUrl}/testexecutions`,
+            {
+              ...updatePayload,
+              testCaseKey,
+            },
+            { headers }
+          );
+          log('ZEPHYR', `  ✓ Posted new execution for ${testCaseKey} [${r.status}]`);
+          updated++;
+        } catch (err) {
+          log('ZEPHYR', `  ✗ POST /testexecutions for ${testCaseKey} failed: ${extractError(err)}`);
+        }
       }
 
       // ── Step 5b · Update actual results per step in test script ─────────────
