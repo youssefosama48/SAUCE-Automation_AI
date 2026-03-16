@@ -799,27 +799,52 @@ jobs:
       - name: Step 10 — Send results to MCP server → update Zephyr cycle
         if: always()
         run: |
-          if [ -f results/test-results.json ] && [ -n "\${{ secrets.MCP_SERVER_URL }}" ]; then
-            echo "Sending results to MCP server..."
-            HTTP_STATUS=$(curl -s -o /tmp/zephyr_response.json -w "%{http_code}" \\
-              -X POST "\${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \\
-              -H "Content-Type: application/json" \\
-              -d @results/test-results.json)
-            echo "Response HTTP \$HTTP_STATUS:"
-            cat /tmp/zephyr_response.json
+          if [ ! -f results/test-results.json ]; then
+            echo "No results file found — skipping Zephyr update"
+            exit 0
+          fi
+          if [ -z "\${{ secrets.MCP_SERVER_URL }}" ]; then
+            echo "MCP_SERVER_URL not set — skipping Zephyr update"
+            exit 0
+          fi
+          echo "=== Sending results to MCP server for Zephyr update ==="
+          cat results/test-results.json
+          HTTP_STATUS=$(curl -s -o /tmp/zephyr_response.json -w "%{http_code}" \
+            --max-time 120 \
+            --retry 3 \
+            --retry-delay 5 \
+            -X POST "\${{ secrets.MCP_SERVER_URL }}/zephyr/update-results" \
+            -H "Content-Type: application/json" \
+            -d @results/test-results.json)
+          echo "MCP server response (HTTP $HTTP_STATUS):"
+          cat /tmp/zephyr_response.json
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Zephyr cycle updated successfully"
           else
-            echo "Skipping — MCP_SERVER_URL not set or no results file"
+            echo "WARNING: Zephyr update returned HTTP $HTTP_STATUS"
           fi
 
-      - name: Fail if any tests failed
+      - name: Report final pipeline status
         if: always()
         run: |
           if [ -f results/test-results.json ]; then
             node -e "
               const r = JSON.parse(require('fs').readFileSync('results/test-results.json'));
-              if (r.summary.failed > 0) {
-                console.error(r.summary.failed + ' test(s) FAILED');
+              const f = r.summary.failed || 0;
+              const p = r.summary.passed || 0;
+              const t = r.summary.total  || 0;
+              console.log('==========================================');
+              console.log('  PIPELINE COMPLETE');
+              console.log('==========================================');
+              console.log('  Total  : ' + t);
+              console.log('  Passed : ' + p);
+              console.log('  Failed : ' + f);
+              console.log('==========================================');
+              if (f > 0) {
+                console.error(f + ' test(s) FAILED');
                 process.exit(1);
+              } else {
+                console.log('All tests PASSED');
               }
             "
           fi
