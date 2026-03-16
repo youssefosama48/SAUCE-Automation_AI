@@ -52,6 +52,12 @@ module.exports = {
       }
     }
   },
+  automation_rules: {
+    locator_priority: ['id', 'css', 'name', 'xpath'],
+    use_explicit_waits: true,
+    page_object_model: true,
+    headless_support: true
+  },
   zephyr: {
     baseUrl: 'https://api.zephyrscale.smartbear.com/v2',
     projectKey: 'SAUC',
@@ -61,12 +67,16 @@ module.exports = {
   github: {
     owner: 'youssefosama48',
     repo: 'SAUCE-Automation_AI',
-    branch: 'master'
+    branch: 'main'
+  },
+  mcpServer: {
+    port: 3000,
+    callbackUrl: 'https://loquaciously-untattered-izola.ngrok-free.dev '
   },
   timeout: {
     implicit: 10000,
     explicit: 15000,
     page_load: 30000
   },
-  headless: process.env.HEADLESS === 'true'
+  headless: process.env.HEADLESS === 'true' || false
 };
